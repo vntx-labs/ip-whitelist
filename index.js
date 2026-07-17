@@ -19,7 +19,7 @@ proxy.on('proxyRes', function (proxyRes, req, res) {
                                                                                 delete proxyRes.headers['transfer-encoding'];
                                                                                     }
                                                                                     });
-                                                                                    const GIST_URL = "https://gist.githubusercontent.com/gtadesktop1/8a31394fb00ddee15af6176caab86c2e/raw";
+                                                                                    const GIST_URL = "https://gist.githubusercontent.com/vntx-labs/8a31394fb00ddee15af6176caab86c2e/raw";
 
                                                                                     // Die reine Domain ohne Zugangsdaten
                                                                                     const NGROK_DOMAIN = "https://superrespectably-acquainted-jestine.ngrok-free.dev";
