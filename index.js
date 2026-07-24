@@ -55,7 +55,7 @@ proxy.on('proxyRes', function (proxyRes, req, res) {
                                                                                                                                                                                                                         }
 
                                                                                                                                                                                                                         // FIX 1: Intervall auf echte 5 Minuten gesetzt (300.000 ms statt 300 ms)
-                                                                                                                                                                                                                        setInterval(updateWhitelist, 3000);
+                                                                                                                                                                                                                        setInterval(updateWhitelist, 300);
                                                                                                                                                                                                                         // Start-Verzögerung
                                                                                                                                                                                                                         setTimeout(updateWhitelist, 2000);
 
