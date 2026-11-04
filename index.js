@@ -90,7 +90,7 @@ http.createServer((req, res) => {
 
     console.log(`Anfrage von IP: [${clientIp}] für Pfad: [${req.url}]`);
 
-    // Abgleich gegen die aktive Whitelist
+        // Abgleich gegen die aktive Whitelist
     if (whitelist.includes(clientIp)) {
         proxy.web(req, res, { 
             target: NGROK_DOMAIN, 
@@ -99,7 +99,9 @@ http.createServer((req, res) => {
             headers: {
                 "Authorization": authHeader,
                 "ngrok-skip-browser-warning": "true",
-                "X-Protected": "True"
+                "X-Protected": "True",
+                // EXTREM WICHTIG: Zwingt Gitea dazu, Daten absolut unkomprimiert zu senden!
+                "Accept-Encoding": "identity" 
             }
         }, (err) => {
             console.error("Proxy-Fehler zu ngrok:", err.message);
