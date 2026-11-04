@@ -3,109 +3,113 @@ const httpProxy = require('http-proxy');
 const axios = require('axios');
 
 const proxy = httpProxy.createProxyServer({});
-// WICHTIG: Pufferung abschalten für Streaming
+
+// --- HEADER ROUTING & LOGIK FIX ---
 proxy.on('proxyRes', function (proxyRes, req, res) {
     const contentType = proxyRes.headers['content-type'] || '';
+    const url = req.url || '';
         
-            // Zwinge den Browser zu glauben, dass es KEIN Video ist
-                if (contentType.includes('audio') || contentType.includes('mpeg')) {
-                        proxyRes.headers['content-type'] = 'audio/mpeg'; // MP3 erzwingen
-                                proxyRes.headers['x-content-type-options'] = 'nosniff';
-                                        proxyRes.headers['cache-control'] = 'no-cache, no-store, must-revalidate';
-                                                proxyRes.headers['connection'] = 'keep-alive';
+    // Diese Header-Manipulation darf NUR beim Radio-Streaming greifen!
+    if (contentType.includes('audio') || contentType.includes('mpeg') || url.includes('/radio')) {
+        proxyRes.headers['content-type'] = 'audio/mpeg'; // MP3 erzwingen
+        proxyRes.headers['x-content-type-options'] = 'nosniff';
+        proxyRes.headers['cache-control'] = 'no-cache, no-store, must-revalidate';
+        proxyRes.headers['connection'] = 'keep-alive';
                                                         
-                                                                // Entferne alles, was den Browser verwirren könnte
-                                                                        delete proxyRes.headers['content-length'];
-                                                                                delete proxyRes.headers['transfer-encoding'];
-                                                                                    }
-                                                                                    });
-                                                                                    const GIST_URL = "https://gist.githubusercontent.com/vntx-labs/8a31394fb00ddee15af6176caab86c2e/raw";
+        // Entferne Längen-Header NUR beim unendlichen Radio-Stream, um Buffering zu verhindern
+        delete proxyRes.headers['content-length'];
+        delete proxyRes.headers['transfer-encoding'];
+    }
+    // Für Gitea/VeloGit Assets (.css, .js) bleiben alle Header hier jetzt unberührt!
+});
 
-                                                                                    // Die reine Domain ohne Zugangsdaten
-                                                                                    const NGROK_DOMAIN = "https://superrespectably-acquainted-jestine.ngrok-free.dev";
+const GIST_URL = "https://gist.githubusercontent.com/vntx-labs/8a31394fb00ddee15af6176caab86c2e/raw";
 
-                                                                                    // Deine 50-Zeichen-Strings für Basic Auth
-                                                                                    const USERNAME = "oI493HHYNPZXcxlAGClDrwmhID3xFJRbrWzeYBsMabgcqqDuZL";
-                                                                                    const PASSWORD = "ql21AgNSJFHxh1aQAqy873ADT3MNExUurNDJTbP7vOf1zOtFJN";
+// Die reine Domain ohne Zugangsdaten
+const NGROK_DOMAIN = "https://superrespectably-acquainted-jestine.ngrok-free.dev";
 
-                                                                                    // Vorbereiten des Authorization Headers (Base64)
-                                                                                    const authHeader = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
+// Deine 50-Zeichen-Strings für Basic Auth
+const USERNAME = "oI493HHYNPZXcxlAGClDrwmhID3xFJRbrWzeYBsMabgcqqDuZL";
+const PASSWORD = "ql21AgNSJFHxh1aQAqy873ADT3MNExUurNDJTbP7vOf1zOtFJN";
 
-                                                                                    let whitelist = [];
-                                                                                    let isUpdating = false;
+// Vorbereiten des Authorization Headers (Base64)
+const authHeader = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 
-                                                                                    // Sichere Update-Funktion für die IP-Whitelist
-                                                                                    async function updateWhitelist() {
-                                                                                        if (isUpdating) return;
-                                                                                            isUpdating = true;
-                                                                                                try {
-                                                                                                        const response = await axios.get(`${GIST_URL}?nocache=${Date.now()}`, { timeout: 5000 });
-                                                                                                                if (response.data) {
-                                                                                                                            whitelist = response.data.split('\n')
-                                                                                                                                            .map(ip => ip.replace('\r', '').trim())
-                                                                                                                                                            .filter(ip => ip.length > 0);
+let whitelist = [];
+let isUpdating = false;
+
+// Sichere Update-Funktion für die IP-Whitelist
+async function updateWhitelist() {
+    if (isUpdating) return;
+    isUpdating = true;
+    try {
+        const response = await axios.get(`${GIST_URL}?nocache=${Date.now()}`, { timeout: 5000 });
+        if (response.data) {
+            whitelist = response.data.split('\n')
+                .map(ip => ip.replace('\r', '').trim())
+                .filter(ip => ip.length > 0);
                                                                                                                                                                         
-                                                                                                                                                                                    console.log(`[${new Date().toISOString()}] Whitelist aktualisiert. Einträge:`, whitelist);
-                                                                                                                                                                                            }
-                                                                                                                                                                                                } catch (e) { 
-                                                                                                                                                                                                        console.error("Fehler beim Laden des Gists:", e.message); 
-                                                                                                                                                                                                            } finally {
-                                                                                                                                                                                                                    isUpdating = false;
-                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                        }
+            console.log(`[${new Date().toISOString()}] Whitelist aktualisiert. Einträge:`, whitelist);
+        }
+    } catch (e) { 
+        console.error("Fehler beim Laden des Gists:", e.message); 
+    } finally {
+        isUpdating = false;
+    }
+}
 
-                                                                                                                                                                                                                        // FIX 1: Intervall auf echte 5 Minuten gesetzt (300.000 ms statt 300 ms)
-                                                                                                                                                                                                                        setInterval(updateWhitelist, 300);
-                                                                                                                                                                                                                        // Start-Verzögerung
-                                                                                                                                                                                                                        setTimeout(updateWhitelist, 2000);
+// FIX: Auf echte 5 Minuten gesetzt (300.000 ms statt fatalen 300 ms RAM-Fresser!)
+setInterval(updateWhitelist, 300000);
+// Start-Verzögerung für den ersten Abruf beim Booten
+setTimeout(updateWhitelist, 2000);
 
-                                                                                                                                                                                                                        // FIX 2: Event-Listener hinzufügen, der den Request-Body für den Proxy fixiert,
-                                                                                                                                                                                                                        // bevor er an ngrok geschickt wird (behebt leere Datei-Uploads)
-                                                                                                                                                                                                                        proxy.on('proxyReq', function(proxyReq, req, res, options) {
-                                                                                                                                                                                                                            if (req.body) {
-                                                                                                                                                                                                                                    let bodyData = JSON.stringify(req.body);
-                                                                                                                                                                                                                                            proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
-                                                                                                                                                                                                                                                    proxyReq.write(bodyData);
-                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                                                        });
+// Event-Listener für Request-Body (behebt leere Datei-Uploads im Git-System)
+proxy.on('proxyReq', function(proxyReq, req, res, options) {
+    if (req.body) {
+        let bodyData = JSON.stringify(req.body);
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+    }
+});
 
-                                                                                                                                                                                                                                                        http.createServer((req, res) => {
-                                                                                                                                                                                                                                                            // IP-Adresse extrahieren
-                                                                                                                                                                                                                                                                let clientIp = '';
-                                                                                                                                                                                                                                                                    const forwardedFor = req.headers['x-forwarded-for'];
-                                                                                                                                                                                                                                                                        
-                                                                                                                                                                                                                                                                            if (forwardedFor) {
-                                                                                                                                                                                                                                                                                    clientIp = forwardedFor.split(',')[0].trim();
-                                                                                                                                                                                                                                                                                        } else {
-                                                                                                                                                                                                                                                                                                clientIp = req.socket.remoteAddress;
-                                                                                                                                                                                                                                                                                                    }
+// Server-Erstellung und IP-Validierung
+http.createServer((req, res) => {
+    // IP-Adresse extrahieren
+    let clientIp = '';
+    const forwardedFor = req.headers['x-forwarded-for'];
+                                                                                                                                                                            
+    if (forwardedFor) {
+        clientIp = forwardedFor.split(',')[0].trim();
+    } else {
+        clientIp = req.socket.remoteAddress;
+    }
 
-                                                                                                                                                                                                                                                                                                        if (clientIp.startsWith('::ffff:')) {
-                                                                                                                                                                                                                                                                                                                clientIp = clientIp.replace('::ffff:', '');
-                                                                                                                                                                                                                                                                                                                    }
+    if (clientIp.startsWith('::ffff:')) {
+        clientIp = clientIp.replace('::ffff:', '');
+    }
 
-                                                                                                                                                                                                                                                                                                                        console.log(`Anfrage von IP: [${clientIp}] für Pfad: [${req.url}]`);
+    console.log(`Anfrage von IP: [${clientIp}] für Pfad: [${req.url}]`);
 
-                                                                                                                                                                                                                                                                                                                            // Abgleich gegen die Whitelist
-                                                                                                                                                                                                                                                                                                                                if (whitelist.includes(clientIp)) {
-                                                                                                                                                                                                                                                                                                                                        proxy.web(req, res, { 
-                                                                                                                                                                                                                                                                                                                                                    target: NGROK_DOMAIN, 
-                                                                                                                                                                                                                                                                                                                                                                changeOrigin: true,
-                                                                                                                                                                                                                                                                                                                                                                            // Hier passiert die Magie: Auth & Bypass Header
-                                                                                                                                                                                                                                                                                                                                                                                        headers: {
-                                                                                                                                                                                                                                                                                                                                                                                                        "Authorization": authHeader,
-                                                                                                                                                                                                                                                                                                                                                                                                                        "ngrok-skip-browser-warning": "true",
-                                                                                                                                                                                                                                                                                                                                                                                                                                        "X-Protected": "True"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                            }, (err) => {
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                        console.error("Proxy-Fehler zu ngrok:", err.message);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                res.end("🛡️ SHIELD TITAN OS: ngrok Tunnel nicht erreichbar.");
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        });
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            } else {
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            res.end(`🛡️ SHIELD TITAN OS: Zugriff verweigert.<br>Deine IP ist nicht freigeschaltet: <b>${clientIp}</b>`);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }).listen(process.env.PORT || 3000, () => {
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    console.log("SHIELD Proxy läuft auf Port", process.env.PORT || 3000);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    });
+    // Abgleich gegen die aktive Whitelist
+    if (whitelist.includes(clientIp)) {
+        proxy.web(req, res, { 
+            target: NGROK_DOMAIN, 
+            changeOrigin: true,
+            // Hier passiert die Magie: Auth & Bypass Header für ngrok
+            headers: {
+                "Authorization": authHeader,
+                "ngrok-skip-browser-warning": "true",
+                "X-Protected": "True"
+            }
+        }, (err) => {
+            console.error("Proxy-Fehler zu ngrok:", err.message);
+            res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end("🛡️ SHIELD TITAN OS: ngrok Tunnel nicht erreichbar.");
+        });
+    } else {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`🛡️ SHIELD TITAN OS: Zugriff verweigert.<br>Deine IP ist nicht freigeschaltet: <b>${clientIp}</b>`);
+    }
+}).listen(process.env.PORT || 3000, () => {
+    console.log("SHIELD Proxy läuft auf Port", process.env.PORT || 3000);
+});
