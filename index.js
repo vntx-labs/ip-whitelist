@@ -81,7 +81,7 @@ db.exec(`
     );
 `);
 
-// DSGVO: Logs nach 14 Tagen löschen
+// DSGVO: Automatische Löschung von Logs nach maximal 14 Tagen
 setInterval(() => {
     db.prepare("DELETE FROM request_logs WHERE timestamp < datetime('now', '-14 days')").run();
 }, 3600000);
@@ -165,13 +165,6 @@ http.createServer(async (req, res) => {
 
     const sessionData = getSessionUser(req);
     const user = sessionData ? sessionData.user : null;
-
-    // 1. WICHTIG: Wenn der User eine aktive Titan-Session hat (nach Klick auf "Weiter auf Titan"), 
-    // leitet der Server ALLES sofort direkt an den Raspi weiter! Kein Render-Dazwischenfunken mehr.
-    if (cookies.titan_session) {
-        if (user) req.titanUser = user;
-        return passToProxy(req, res);
-    }
 
     // Gesperrte User abfangen (Admin ist ungesperrt)
     if (user && user.is_banned && user.email !== ADMIN_EMAIL && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
@@ -291,8 +284,16 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Statische Render-HTML-Seiten
-    if (urlPath === '/' || urlPath === '/index.html') {
+    // DSGVO KORREKTUR: Nur die Log-Daten des Nutzers sofort löschen (Recht auf Vergessenwerden, völlig unabhängig vom Account!)
+    if (urlPath === '/api/dsgvo/delete-logs' && user) {
+        db.prepare('DELETE FROM request_logs WHERE user_id = ?').run(user.id);
+        db.prepare('UPDATE users SET traffic_used = 0 WHERE id = ?').run(user.id); // Auch Traffic-Zähler zurücksetzen
+        res.writeHead(302, { 'Location': '/dashboard.html?deleted=1' });
+        return res.end();
+    }
+
+    // Statische Render-HTML-Seiten (Startseite läuft auf /index.html)
+    if (urlPath === '/index.html') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
             return res.end();
@@ -322,7 +323,7 @@ http.createServer(async (req, res) => {
         const limitGB = (user.traffic_limit / (1024 * 1024 * 1024)).toFixed(2);
         
         const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(user.id);
-        const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden.</td></tr>';
+        const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden (DSGVO-konform gelöscht).</td></tr>';
         
         return serveFile(res, 'public/dashboard.html', { '{{USER_EMAIL}}': user.email, '{{USED_GB}}': usedGB, '{{LIMIT_GB}}': limitGB, '{{LOGS}}': logsHtml });
     }
@@ -380,21 +381,7 @@ http.createServer(async (req, res) => {
         return serveFile(res, 'public/help.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
-    if (urlPath === '/api/dsgvo/delete' && user) {
-        if (user.email === ADMIN_EMAIL) {
-            res.writeHead(302, { 'Location': '/dashboard.html' });
-            return res.end();
-        }
-        db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
-        res.setHeader('Set-Cookie', [
-            cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }),
-            cookie.serialize('titan_session', '', { maxAge: 0, path: '/' })
-        ]);
-        res.writeHead(302, { 'Location': '/login.html' });
-        return res.end();
-    }
-
-    // Raspi-Tunnel Aktivierung ("Weiter auf Titan" auf der Startseite)
+    // Raspi-Tunnel Aktivierung ("Weiter auf Titan")
     if (urlPath === '/tunnel') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
@@ -409,8 +396,13 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 2. FALLBACK FÜR ALLES UNBEKANNTE: 
-    // Jede Route, die Render nicht explizit als Render-Seite kennt, wird nun restlos an den Raspi durchgereicht!
+    // 3. RASPI = / (und alles, was der Raspi anfragt, wenn die Session aktiv ist oder standardmäßig auf / zugreift)
+    if (urlPath === '/' || cookies.titan_session) {
+        if (user) req.titanUser = user;
+        return passToProxy(req, res);
+    }
+
+    // 4. Fallback für alle anderen unbekannten Anfragen
     if (user) {
         req.titanUser = user;
     }
