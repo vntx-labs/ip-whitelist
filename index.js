@@ -156,7 +156,6 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. Whitelist-Check: Sofort hart zum Raspi-Tunnel durchleiten
     if (whitelist.includes(clientIp)) {
         return passToProxy(req, res);
     }
@@ -167,12 +166,12 @@ http.createServer(async (req, res) => {
     const sessionData = getSessionUser(req);
     const user = sessionData ? sessionData.user : null;
 
-    // Wenn der Nutzer gesperrt ist, zeige IMMER die Bann-Seite
-    if (user && user.is_banned && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
+    // Gesperrte User abfangen (Admin ist IMMER geschützt und wird nie gesperrt!)
+    if (user && user.is_banned && user.email !== ADMIN_EMAIL && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
         return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
-    // 2. RASPI = / -> Wenn der Nutzer auf / zugreift, leiten wir direkt zum Raspi weiter!
+    // Raspi-Tunnel Weiche auf /
     if (urlPath === '/') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
@@ -182,7 +181,7 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 3. Auth Endpoints
+    // Auth Endpoints
     if (urlPath === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         let u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
@@ -222,7 +221,6 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // ADMIN GOOGLE OAUTH HANDLER (Zwingendes zweites OAuth direkt für admin.html)
     if (urlPath === '/api/auth/admin-google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -238,7 +236,6 @@ http.createServer(async (req, res) => {
                 u = db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
             }
             const token = crypto.randomBytes(32).toString('hex');
-            // Setzt explizit is_admin_session = 1
             db.prepare('INSERT INTO sessions (token, user_id, is_admin_session, expires_at) VALUES (?, ?, 1, ?)').run(token, u.id, new Date(Date.now() + 3600000).toISOString());
             res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' }));
             res.writeHead(302, { 'Location': '/admin.html' });
@@ -249,7 +246,6 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // Logout
     if (urlPath === '/api/auth/logout') {
         res.setHeader('Set-Cookie', [
             cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }),
@@ -259,7 +255,6 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Hilfe-Ticket abschicken
     if (urlPath === '/api/help/submit' && req.method === 'POST') {
         const { message } = await parsePostData(req);
         const email = user ? user.email : 'Anonym';
@@ -270,7 +265,6 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Admin Ticket abhaken
     if (urlPath === '/api/admin/resolve-ticket' && req.method === 'POST') {
         if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
@@ -282,19 +276,26 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Admin Konto sperren / entsperren
     if (urlPath === '/api/admin/ban' && req.method === 'POST') {
         if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
             return res.end("Unauthorized");
         }
         const { user_id, action } = await parsePostData(req);
+        
+        // Sicherheits-Check: Admin kann sich selbst NIEMALS sperren!
+        const targetUser = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
+        if (targetUser && targetUser.email === ADMIN_EMAIL) {
+            res.writeHead(302, { 'Location': '/admin.html' });
+            return res.end();
+        }
+
         db.prepare('UPDATE users SET is_banned = ? WHERE id = ?').run(action === 'ban' ? 1 : 0, user_id);
         res.writeHead(302, { 'Location': '/admin.html' });
         return res.end();
     }
 
-    // 4. Statische HTML-Seiten Routing
+    // Statische HTML-Seiten
     if (urlPath === '/index.html') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
@@ -323,14 +324,15 @@ http.createServer(async (req, res) => {
         }
         const usedGB = (user.traffic_used / (1024 * 1024 * 1024)).toFixed(2);
         const limitGB = (user.traffic_limit / (1024 * 1024 * 1024)).toFixed(2);
-        const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all();
+        
+        // BEHOBEN: user.id wird jetzt korrekt als Parameter übergeben!
+        const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(user.id);
         const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden.</td></tr>';
         
         return serveFile(res, 'public/dashboard.html', { '{{USER_EMAIL}}': user.email, '{{USED_GB}}': usedGB, '{{LIMIT_GB}}': limitGB, '{{LOGS}}': logsHtml });
     }
 
     if (urlPath === '/admin.html') {
-        // Prüfen ob die aktive Session eine Admin-Session ist
         if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             const host = req.headers['host'] || 'ip-whitelist.onrender.com';
             const protocol = req.headers['x-forwarded-proto'] || 'https';
@@ -341,20 +343,25 @@ http.createServer(async (req, res) => {
             });
         }
         const users = db.prepare('SELECT * FROM users').all();
-        const usersHtml = users.map(u => `
-            <tr>
-                <td>${u.id}</td>
-                <td>${u.email}</td>
-                <td>${u.is_banned ? '<span style="color:#f85149">Gesperrt</span>' : '<span style="color:#2ea043">Aktiv</span>'}</td>
-                <td>
-                    <form action="/api/admin/ban" method="POST" style="display:inline;">
-                        <input type="hidden" name="user_id" value="${u.id}">
-                        <input type="hidden" name="action" value="${u.is_banned ? 'unban' : 'ban'}">
-                        <button type="submit" style="background:${u.is_banned ? '#238636' : '#da3633'}; color:#fff; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">${u.is_banned ? 'Entsperren' : 'Sperren'}</button>
-                    </form>
-                </td>
-            </tr>
-        `).join('');
+        const usersHtml = users.map(u => {
+            const isAdminSelf = u.email === ADMIN_EMAIL;
+            return `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.email} ${isAdminSelf ? '<strong>(ADMIN)</strong>' : ''}</td>
+                    <td>${u.is_banned ? '<span style="color:#f85149">Gesperrt</span>' : '<span style="color:#2ea043">Aktiv</span>'}</td>
+                    <td>
+                        ${!isAdminSelf ? `
+                            <form action="/api/admin/ban" method="POST" style="display:inline;">
+                                <input type="hidden" name="user_id" value="${u.id}">
+                                <input type="hidden" name="action" value="${u.is_banned ? 'unban' : 'ban'}">
+                                <button type="submit" style="background:${u.is_banned ? '#238636' : '#da3633'}; color:#fff; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">${u.is_banned ? 'Entsperren' : 'Sperren'}</button>
+                            </form>
+                        ` : '<span style="color:#8b949e; font-size:0.8rem;">Gesperrt unmöglich</span>'}
+                    </td>
+                </tr>
+            `;
+        }).join('');
 
         const tickets = db.prepare('SELECT * FROM help_tickets ORDER BY id DESC').all();
         const ticketsHtml = tickets.length > 0 ? tickets.map(t => `
@@ -378,8 +385,12 @@ http.createServer(async (req, res) => {
         return serveFile(res, 'public/help.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
-    // DSGVO Löschung
     if (urlPath === '/api/dsgvo/delete' && user) {
+        // Admin kann sich über DSGVO-Löschung nicht selbst löschen
+        if (user.email === ADMIN_EMAIL) {
+            res.writeHead(302, { 'Location': '/dashboard.html' });
+            return res.end();
+        }
         db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
         res.setHeader('Set-Cookie', [
             cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }),
@@ -389,7 +400,6 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Wenn absolut keine Route passt -> 404 (Schützt vor jeglichem 502 Bad Gateway)
     res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end("<h1>404 Not Found</h1>");
 
@@ -400,7 +410,7 @@ http.createServer(async (req, res) => {
 function serveFile(res, filePath, replacements = {}) {
     const fullPath = path.join(__dirname, filePath);
     fs.readFile(fullPath, 'utf8', (err, content) => {
-        if (err) {
+        if, err {
             res.writeHead(404, { 'Content-Type': 'text/plain' });
             return res.end('Datei nicht gefunden.');
         }
