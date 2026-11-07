@@ -19,11 +19,11 @@
         <hr style="border:0; border-top:1px solid #30363d; margin:15px 0;">
         <h3>Traffic-Verbrauch: {{USED_GB}} GB von {{LIMIT_GB}} GB</h3>
         
-        <h3 style="margin-top: 25px;">Aktivitäts-Protokoll (DSGVO-geschützt)</h3>
+        <h3 style="margin-top: 25px;">Aktivitäts-Protokoll & Seiten-Bandbreite</h3>
         <table>
-            <tr><th>Zeitpunkt</th><th>Methode</th><th>URL</th></tr>
+            <tr><th>Zeitpunkt</th><th>Methode</th><th>Aufgerufene URL / Seite</th><th>Größe</th></tr>
             {{LOGS}}
-        </table>
+        </span>
 
         <!-- DSGVO: Nur Log-Daten löschen ohne Account-Zerstörung -->
         <form action="/api/dsgvo/delete-logs" method="POST" onsubmit="return confirm('Möchten Sie Ihre Aktivitäts-Protokolle und Traffic-Daten gemäß DSGVO (Recht auf Vergessenwerden) jetzt sofort unwiderruflich löschen?');">
