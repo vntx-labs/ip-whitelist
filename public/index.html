@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>TITAN GATEWAY — Startseite</title>
+    <style>
+        body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 400px; text-align: center; }
+        a.btn { display: block; width: 100%; padding: 12px; margin: 10px 0; background: #238636; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold; box-sizing: border-box; }
+        a.btn-dash { background: #1f6feb; }
+        a.btn-admin { background: #da3633; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>🛡️ TITAN GATEWAY</h2>
+        <p style="color: #8b949e; margin-bottom: 20px;">Eingeloggt als: {{USER_EMAIL}}</p>
+        
+        <a href="/tunnel" class="btn">1. Weiter auf Titan (Raspi)</a>
+        <a href="/dashboard.html" class="btn btn-dash">2. Zum Dashboard (DSGVO / Logs)</a>
+        <a href="/admin.html" id="adminBtn" class="btn btn-admin">3. Admin Control Center</a>
+    </div>
+
+    <script>
+        const isAdmin = "{{IS_ADMIN}}" === "true";
+        if (isAdmin) {
+            document.getElementById('adminBtn').style.display = 'block';
+        }
+    </script>
+</body>
+</html>
