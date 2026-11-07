@@ -1,5 +1,5 @@
 const http = require('http');
-const httpProxy = httpProxy = require('http-proxy');
+const httpProxy = require('http-proxy');
 const axios = require('axios');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
