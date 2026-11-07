@@ -88,25 +88,31 @@ setInterval(() => {
 
 const proxy = httpProxy.createProxyServer({});
 
-// --- DETAILLIERTES TRAFFIC- & URL-LOGGING ---
+// --- ROBUSTER TRAFFIC-ZÄHLER (Zählt echte Bytes via Chunks) ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
-    // Wenn ein authentifizierter Nutzer den Proxy passiert
     if (req.titanUser) {
-        // Bytes ermitteln (falls content-length vorhanden, sonst 0)
-        const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
-        
-        // 1. Traffic-Zähler des Nutzers erhöhen
-        if (bytes > 0) {
-            db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
-        }
-        
-        // 2. Client-IP bereinigen
-        let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
-        if (clientIp && clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
-        
-        // 3. Exakten URL-Pfad, Methode und Bandbreite in request_logs festhalten
-        db.prepare('INSERT INTO request_logs (user_id, method, url, ip, bytes_transferred) VALUES (?, ?, ?, ?, ?)')
-          .run(req.titanUser.id, req.method, req.url, clientIp, bytes);
+        let responseBytes = 0;
+
+        // Wir hängen uns an den Datenstrom der Antwort, die vom Raspi zurückkommt
+        proxyRes.on('data', function (chunk) {
+            responseBytes += chunk.length;
+        });
+
+        // Wenn die Übertragung beendet ist, schreiben wir den exakten Wert in die DB
+        proxyRes.on('end', function () {
+            if (responseBytes > 0) {
+                // 1. Traffic-Zähler des Nutzers erhöhen
+                db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(responseBytes, req.titanUser.id);
+                
+                // 2. Client-IP bereinigen
+                let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
+                if (clientIp && clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
+                
+                // 3. In die Logs schreiben
+                db.prepare('INSERT INTO request_logs (user_id, method, url, ip, bytes_transferred) VALUES (?, ?, ?, ?, ?)')
+                  .run(req.titanUser.id, req.method, req.url, clientIp, responseBytes);
+            }
+        });
     }
 });
 
