@@ -190,6 +190,15 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
+    // --- TITAN SESSION TRENNEN (Zurück zu index.html) ---
+    if (urlPath === '/api/auth/disconnect-titan') {
+        res.setHeader('Set-Cookie', [
+            cookie.serialize('titan_session', '', { maxAge: 0, path: '/' })
+        ]);
+        res.writeHead(302, { 'Location': '/index.html' });
+        return res.end();
+    }
+
     if (urlPath === '/api/auth/google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
