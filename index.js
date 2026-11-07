@@ -1,5 +1,5 @@
 const http = require('http');
-const httpProxy = require('http-proxy');
+const httpProxy = httpProxy = require('http-proxy');
 const axios = require('axios');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
@@ -7,18 +7,18 @@ const cookie = require('cookie');
 const { OAuth2Client } = require('google-auth-library');
 const crypto = require('crypto');
 
-// --- ENVIRONMENT VARIABLEN EINLESEN (Alles rein über URLs & Env) ---
+// --- ENVIRONMENT VARIABLEN EINLESEN ---
 const PORT = process.env.PORT || 3000;
 const GIST_WHITELIST_URL = process.env.GIST_WHITELIST_URL;
-const GIST_DB_URL = process.env.GIST_DB_URL; // Die vollständige RAW-URL des DB-Gists
+const GIST_DB_URL = process.env.GIST_DB_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GIST_PATCH_API_URL = process.env.GIST_PATCH_API_URL; // Die normale Gist-API-URL zum Updaten (z.B. https://api.github.com/gists/DEINE_ID)
+const GIST_PATCH_API_URL = process.env.GIST_PATCH_API_URL;
 const NGROK_DOMAIN = process.env.NGROK_DOMAIN;
 const NGROK_USER = process.env.NGROK_USER;
 const NGROK_PASS = process.env.NGROK_PASS;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
-// Sicherheits-Check
+// Sicherheits-Check beim Start
 const missingEnvs = [];
 if (!GIST_WHITELIST_URL) missingEnvs.push('GIST_WHITELIST_URL');
 if (!GIST_DB_URL) missingEnvs.push('GIST_DB_URL');
@@ -47,7 +47,7 @@ db.exec(`
         password_hash TEXT,
         auth_provider TEXT DEFAULT 'local',
         traffic_used INTEGER DEFAULT 0,
-        traffic_limit INTEGER DEFAULT 10737418240,
+        traffic_limit INTEGER DEFAULT 10737418240, -- 10 GB Standard
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -64,25 +64,27 @@ const proxy = httpProxy.createProxyServer({});
 let whitelist = [];
 let isUpdatingWhitelist = false;
 
-// 1. IP-Whitelist via URL laden
+// 1. IP-Whitelist via URL laden (Hintergrund-Intervall alle 5 Min.)
 async function updateWhitelist() {
     if (isUpdatingWhitelist) return;
     isUpdatingWhitelist = true;
     try {
         const response = await axios.get(`${GIST_WHITELIST_URL}?nocache=${Date.now()}`, { timeout: 5000 });
         if (response.data) {
-            whitelist = response.data.split('\n')
-                .map(ip => ip.replace('\r', '').trim())
+            const rawData = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+            whitelist = rawData.split('\n')
+                .map(ip => ip.replace('\r', '').replace(/"/g, '').trim())
                 .filter(ip => ip.length > 0);
+            console.log(`[WHITELIST] Aktualisiert. Einträge:`, whitelist);
         }
     } catch (e) { 
-        console.error("Fehler beim Laden der Whitelist:", e.message); 
+        console.error("[WHITELIST] Fehler beim Laden des Gists:", e.message); 
     } finally {
         isUpdatingWhitelist = false;
     }
 }
 setInterval(updateWhitelist, 300000);
-setTimeout(updateWhitelist, 2000);
+setTimeout(updateWhitelist, 1000);
 
 // 2. DB-State über die Gist-URL laden beim Start
 async function loadDatabaseFromGist() {
@@ -97,15 +99,15 @@ async function loadDatabaseFromGist() {
             for (const s of res.data.sessions || []) {
                 insertSession.run(s.token, s.user_id, s.expires_at);
             }
-            console.log(`[DB] ${res.data.users.length} Nutzer via Gist-URL geladen.`);
+            console.log(`[DB] ${res.data.users.length} Nutzer via Gist-URL in den RAM geladen.`);
         }
     } catch (e) {
         console.error("[DB] Konnte Gist-DB via URL nicht laden (initial leer?):", e.message);
     }
 }
-setTimeout(loadDatabaseFromGist, 3000);
+setTimeout(loadDatabaseFromGist, 2500);
 
-// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern
+// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern (Traffic-Zähler & neue User)
 async function syncDatabaseToGist() {
     try {
         const users = db.prepare('SELECT * FROM users').all();
@@ -114,7 +116,7 @@ async function syncDatabaseToGist() {
 
         await axios.patch(GIST_PATCH_API_URL, {
             files: {
-                'titan_users.json': { content: payload }
+                'user_db.json': { content: payload }
             }
         }, {
             headers: { Authorization: `token ${GITHUB_TOKEN}` },
@@ -124,7 +126,7 @@ async function syncDatabaseToGist() {
         console.error("[DB Sync] Fehler beim Speichern ins Gist:", e.message);
     }
 }
-setInterval(syncDatabaseToGist, 10000);
+setInterval(syncDatabaseToGist, 10000); // Alle 10 Sekunden
 
 // --- PROXY HEADER & TRAFFIC ZÄHLUNG ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
@@ -140,6 +142,7 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
         delete proxyRes.headers['transfer-encoding'];
     }
 
+    // Traffic für angemeldete Nutzer (nicht für whitelisted IPs) mitzählen
     if (req.titanUser && proxyRes.headers['content-length']) {
         const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
         db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
@@ -162,7 +165,7 @@ function getSessionUser(req) {
 
 function createSession(res, userId) {
     const token = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 Tage
     db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires.toISOString());
     
     res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
@@ -246,16 +249,19 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
+    // 1. Ist die IP in der Whitelist? -> Unendlich Traffic, direkt durchwinken!
     if (whitelist.includes(clientIp)) {
         return passToProxy(req, res);
     }
 
+    // 2. Auth Endpoints verarbeiten
     if (req.url === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         if (!email || !password) return renderLoginPage(res, 'Bitte E-Mail und Passwort eingeben.');
 
         let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!user) {
+            // Automatisches Registrieren bei neuem Login
             const hash = bcrypt.hashSync(password, 10);
             const result = db.prepare('INSERT INTO users (email, password_hash, auth_provider) VALUES (?, ?, ?)').run(email, hash, 'local');
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
@@ -276,6 +282,7 @@ http.createServer(async (req, res) => {
 
             let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
             if (!user) {
+                // Google Registrierung
                 const result = db.prepare('INSERT INTO users (email, auth_provider) VALUES (?, ?)').run(email, 'google');
                 user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
             }
@@ -288,16 +295,18 @@ http.createServer(async (req, res) => {
         }
     }
 
+    // 3. Session & Traffic-Limit Check für alle anderen Nutzer
     const user = getSessionUser(req);
     if (user) {
         if (user.traffic_used >= user.traffic_limit) {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
             return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
         }
-        req.titanUser = user;
+        req.titanUser = user; // Markiert den Request für den Traffic-Zähler im Proxy
         return passToProxy(req, res);
     }
 
+    // 4. Nicht whitelisted & nicht eingeloggt -> Zeige die Login- / Registrierungs-Maske
     renderLoginPage(res);
 
 }).listen(PORT, () => {
