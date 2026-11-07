@@ -1,7 +1,6 @@
 {
-  "name": "shield-titan-proxy-gate",
+  "name": "titan-gateway",
   "version": "1.0.0",
-  "description": "IP-Filter Gateway für Shield Titan OS",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -13,8 +12,5 @@
     "cookie": "^0.6.0",
     "google-auth-library": "^9.0.0",
     "http-proxy": "^1.18.1"
-  },
-  "engines": {
-    "node": ">=18.0.0",
   }
 }
