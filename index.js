@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// --- ENVIRONMENT VARIABLEN EINLESEN ---
+// --- ENVIRONMENT VARIABLEN ---
 const PORT = process.env.PORT || 3000;
 const GIST_WHITELIST_URL = process.env.GIST_WHITELIST_URL;
 const GIST_DB_URL = process.env.GIST_DB_URL;
@@ -57,6 +57,7 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
         token TEXT PRIMARY KEY,
         user_id INTEGER,
+        is_admin_session INTEGER DEFAULT 0,
         expires_at DATETIME,
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
@@ -70,6 +71,13 @@ db.exec(`
         bytes_transferred INTEGER,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS help_tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT,
+        message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 `);
 
@@ -100,8 +108,8 @@ async function loadDatabaseFromGist() {
         if (res.data && res.data.users) {
             const insUser = db.prepare('INSERT OR REPLACE INTO users (id, email, password_hash, auth_provider, traffic_used, traffic_limit, is_banned, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
             for (const u of res.data.users || []) insUser.run(u.id, u.email, u.password_hash, u.auth_provider, u.traffic_used, u.traffic_limit, u.is_banned || 0, u.created_at);
-            const insSes = db.prepare('INSERT OR REPLACE INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)');
-            for (const s of res.data.sessions || []) insSes.run(s.token, s.user_id, s.expires_at);
+            const insSes = db.prepare('INSERT OR REPLACE INTO sessions (token, user_id, is_admin_session, expires_at) VALUES (?, ?, ?, ?)');
+            for (const s of res.data.sessions || []) insSes.run(s.token, s.user_id, s.is_admin_session || 0, s.expires_at);
         }
     } catch (e) { console.error("[DB] Ladefehler:", e.message); }
 }
@@ -126,8 +134,8 @@ function getSessionUser(req) {
     const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
     if (!session || new Date(session.expires_at) < new Date()) return null;
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.user_id);
-    if (!user || user.is_banned) return null;
-    return user;
+    if (!user) return null;
+    return { user, session };
 }
 
 function parsePostData(req) {
@@ -156,17 +164,26 @@ http.createServer(async (req, res) => {
     const cookies = cookie.parse(req.headers.cookie || '');
     const urlPath = req.url.split('?')[0];
 
-    // 2. ROOT ROUTE (/) Weiche: Wenn titan_session Cookie aktiv ist -> Zum Raspi proxyn! Ansonsten zu index.html
-    if (urlPath === '/') {
-        if (cookies.titan_session) {
-            const user = getSessionUser(req);
-            if (user) {
-                req.titanUser = user;
-                return passToProxy(req, res);
-            }
+    const sessionData = getSessionUser(req);
+    const user = sessionData ? sessionData.user : null;
+
+    // Wenn der Nutzer gesperrt ist, zeige IMMER die Bann-Seite (außer er ruft /help.html oder das Formular auf)
+    if (user && user.is_banned && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
+        return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
+    }
+
+    // 2. Raspi-Tunnel Weiche: Wenn titan_session Cookie aktiv ist -> Zum Raspi proxyn!
+    if (urlPath === '/' && cookies.titan_session) {
+        if (user) req.titanUser = user;
+        return passToProxy(req, res);
+    }
+
+    if (urlPath === '/' || urlPath === '/index.html') {
+        if (!user) {
+            res.writeHead(302, { 'Location': '/login.html' });
+            return res.end();
         }
-        res.writeHead(302, { 'Location': '/index.html' });
-        return res.end();
+        return serveFile(res, 'public/index.html', { '{{USER_EMAIL}}': user.email, '{{IS_ADMIN_USER}}': user.email === ADMIN_EMAIL ? 'true' : 'false' });
     }
 
     // 3. Auth Endpoints
@@ -209,7 +226,7 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // Admin Google OAuth Handler (für direkten Login auf der Admin-Seite)
+    // Admin Google OAuth Handler (Zwingendes zweites OAuth direkt für Admin)
     if (urlPath === '/api/auth/admin-google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -217,7 +234,7 @@ http.createServer(async (req, res) => {
             const email = ticket.getPayload().email;
             if (email !== ADMIN_EMAIL) {
                 res.writeHead(403);
-                return res.end("Unautorisiert: Nur für den Admin.");
+                return res.end("Unautorisiert: Nur für info.orbit.link@gmail.com.");
             }
             let u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
             if (!u) {
@@ -225,8 +242,8 @@ http.createServer(async (req, res) => {
                 u = db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
             }
             const token = crypto.randomBytes(32).toString('hex');
-            db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, u.id, new Date(Date.now() + 86400000).toISOString());
-            res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 86400, sameSite: 'lax' }));
+            db.prepare('INSERT INTO sessions (token, user_id, is_admin_session, expires_at) VALUES (?, ?, 1, ?)').run(token, u.id, new Date(Date.now() + 3600000).toISOString());
+            res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' }));
             res.writeHead(302, { 'Location': '/admin.html' });
             return res.end();
         } catch (e) {
@@ -245,17 +262,42 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 4. Statische HTML-Seiten & Wächter
-    const user = getSessionUser(req);
-
-    if (urlPath === '/index.html') {
-        if (!user) {
-            res.writeHead(302, { 'Location': '/login.html' });
-            return res.end();
+    // Hilfe-Ticket abschicken
+    if (urlPath === '/api/help/submit' && req.method === 'POST') {
+        const { message } = await parsePostData(req);
+        const email = user ? user.email : 'Anonym';
+        if (message) {
+            db.prepare('INSERT INTO help_tickets (user_email, message) VALUES (?, ?)').run(email, message);
         }
-        return serveFile(res, 'public/index.html', { '{{USER_EMAIL}}': user.email, '{{IS_ADMIN}}': user.email === ADMIN_EMAIL ? 'true' : 'false' });
+        res.writeHead(302, { 'Location': '/help.html?success=1' });
+        return res.end();
     }
 
+    // Admin Ticket abhaken/löschen
+    if (urlPath === '/api/admin/resolve-ticket' && req.method === 'POST') {
+        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
+            res.writeHead(403);
+            return res.end("Unauthorized");
+        }
+        const { ticket_id } = await parsePostData(req);
+        db.prepare('DELETE FROM help_tickets WHERE id = ?').run(ticket_id);
+        res.writeHead(302, { 'Location': '/admin.html' });
+        return res.end();
+    }
+
+    // Admin Konto sperren / entsperren
+    if (urlPath === '/api/admin/ban' && req.method === 'POST') {
+        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
+            res.writeHead(403);
+            return res.end("Unauthorized");
+        }
+        const { user_id, action } = await parsePostData(req);
+        db.prepare('UPDATE users SET is_banned = ? WHERE id = ?').run(action === 'ban' ? 1 : 0, user_id);
+        res.writeHead(302, { 'Location': '/admin.html' });
+        return res.end();
+    }
+
+    // 4. Statische HTML-Seiten
     if (urlPath === '/login.html') {
         if (user) {
             res.writeHead(302, { 'Location': '/index.html' });
@@ -283,8 +325,8 @@ http.createServer(async (req, res) => {
     }
 
     if (urlPath === '/admin.html') {
-        // Wenn nicht eingeloggt oder nicht Admin -> Zeige OAuth Admin-Login-Seite statt 403!
-        if (!user || user.email !== ADMIN_EMAIL) {
+        // Prüfen ob Admin-Session aktiv
+        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
             const host = req.headers['host'] || 'ip-whitelist.onrender.com';
             const protocol = req.headers['x-forwarded-proto'] || 'https';
             return serveFile(res, 'public/admin_login.html', {
@@ -294,11 +336,44 @@ http.createServer(async (req, res) => {
             });
         }
         const users = db.prepare('SELECT * FROM users').all();
-        const usersHtml = users.map(u => `<tr><td>${u.id}</td><td>${u.email}</td><td>${u.is_banned ? 'Gesperrt' : 'Aktiv'}</td></tr>`).join('');
-        return serveFile(res, 'public/admin.html', { '{{USERS}}': usersHtml });
+        const usersHtml = users.map(u => `
+            <tr>
+                <td>${u.id}</td>
+                <td>${u.email}</td>
+                <td>${u.is_banned ? '<span style="color:#f85149">Gesperrt</span>' : '<span style="color:#2ea043">Aktiv</span>'}</td>
+                <td>
+                    <form action="/api/admin/ban" method="POST" style="display:inline;">
+                        <input type="hidden" name="user_id" value="${u.id}">
+                        <input type="hidden" name="action" value="${u.is_banned ? 'unban' : 'ban'}">
+                        <button type="submit" style="background:${u.is_banned ? '#238636' : '#da3633'}; color:#fff; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">${u.is_banned ? 'Entsperren' : 'Sperren'}</button>
+                    </form>
+                </td>
+            </tr>
+        `).join('');
+
+        const tickets = db.prepare('SELECT * FROM help_tickets ORDER BY id DESC').all();
+        const ticketsHtml = tickets.length > 0 ? tickets.map(t => `
+            <tr>
+                <td>${t.timestamp}</td>
+                <td>${t.user_email}</td>
+                <td>${t.message}</td>
+                <td>
+                    <form action="/api/admin/resolve-ticket" method="POST" style="display:inline;">
+                        <input type="hidden" name="ticket_id" value="${t.id}">
+                        <button type="submit" style="background:#238636; color:#fff; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">Abhaken</button>
+                    </form>
+                </td>
+            </tr>
+        `).join('') : '<tr><td colspan="4">Keine offenen Probleme.</td></tr>';
+
+        return serveFile(res, 'public/admin.html', { '{{USERS}}': usersHtml, '{{TICKETS}}': ticketsHtml, '{{ADMIN_EMAIL}}': user.email });
     }
 
-    // DSGVO Löschung
+    if (urlPath === '/help.html') {
+        return serveFile(res, 'public/help.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
+    }
+
+    // DSGVO Berichtigung / Löschung
     if (urlPath === '/api/dsgvo/delete' && user) {
         db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
         res.setHeader('Set-Cookie', [
@@ -324,9 +399,9 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Wenn keine Route greift -> Sauberes 404 statt Proxy-Fehler!
+    // Wenn keine Route greift -> Sauberes 404
     res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end("<h1>404 Not Found</h1><p>Die angeforderte Seite existiert nicht.</p>");
+    res.end("<h1>404 Not Found</h1>");
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
@@ -353,7 +428,7 @@ function passToProxy(req, res) {
         changeOrigin: true,
         headers: {
             "Authorization": authHeader,
-            "ngrok-ngrok-skip-browser-warning": "true",
+            "ngrok-skip-browser-warning": "true",
             "X-Protected": "True",
             "Accept-Encoding": "identity" 
         }
