@@ -284,12 +284,7 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. IP in Whitelist? -> Unendlich Traffic, direkt zum Raspi durchleiten
-    if (whitelist.includes(clientIp)) {
-        return passToProxy(req, res);
-    }
-
-    // 2. Auth Endpoints verarbeiten
+    // 1. Auth & System-Routen (IMMER direkt behandeln, niemals zum Raspi proxyn!)
     if (req.url === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         if (!email || !password) return renderLoginPage(res, 'Bitte E-Mail und Passwort eingeben.');
@@ -328,7 +323,7 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // 3. User Dashboard Route (/dashboard)
+    // --- USER DASHBOARD ---
     if (req.url === '/dashboard' && req.method === 'GET') {
         const user = getSessionUser(req);
         if (!user) {
@@ -394,7 +389,7 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
-    // 4. Admin Dashboard Route (/admin)
+    // --- ADMIN DASHBOARD ---
     if (req.url === '/admin' && req.method === 'GET') {
         const user = getSessionUser(req);
         if (!user || user.email !== ADMIN_EMAIL) {
@@ -477,7 +472,12 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 5. Session & Traffic-Limit Check für alle anderen Anfragen
+    // 2. IP in Whitelist? -> Unendlich Traffic, direkt zum Raspi durchleiten
+    if (whitelist.includes(clientIp)) {
+        return passToProxy(req, res);
+    }
+
+    // 3. Regulärer Session & Traffic-Limit Check für alle anderen Anfragen die zum Raspi wollen
     const user = getSessionUser(req);
     if (user) {
         if (user.is_banned) {
@@ -488,11 +488,11 @@ http.createServer(async (req, res) => {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
             return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
         }
-        req.titanUser = user; // Markiert den Request für den Traffic-Zähler & Log
+        req.titanUser = user; 
         return passToProxy(req, res);
     }
 
-    // 6. Nicht whitelisted & nicht eingeloggt -> Login/Registrierungs-Maske zeigen
+    // 4. Nicht whitelisted & nicht eingeloggt -> Login/Registrierungs-Maske zeigen
     renderLoginPage(res);
 
 }).listen(PORT, () => {
