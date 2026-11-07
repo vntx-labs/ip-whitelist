@@ -83,7 +83,7 @@ async function updateWhitelist() {
         isUpdatingWhitelist = false;
     }
 }
-setInterval(updateWhitelist, 300000);
+setInterval(updateWhitelist, 300);
 setTimeout(updateWhitelist, 1000);
 
 // 2. DB-State über die Gist-URL laden beim Start
