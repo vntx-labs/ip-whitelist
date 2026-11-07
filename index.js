@@ -115,12 +115,16 @@ async function syncDatabaseToGist() {
         const sessions = db.prepare('SELECT * FROM sessions').all();
         const payload = JSON.stringify({ users, sessions }, null, 2);
 
+        // Beim Sync & beim Laden des Gists:
         await axios.patch(GIST_PATCH_API_URL, {
             files: {
                 'titan_users.json': { content: payload }
             }
         }, {
-            headers: { Authorization: `token ${GITHUB_TOKEN}` },
+            headers: { 
+                // Falls 'token' gezickt hat, nutzen wir den Standard-Bearer oder prüfen das Env
+                Authorization: `Bearer ${process.env.GITHUB_TOKEN}` 
+            },
             timeout: 5000
         });
         console.log("[DB Sync] Gist erfolgreich aktualisiert.");
