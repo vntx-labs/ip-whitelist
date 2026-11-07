@@ -76,7 +76,7 @@ db.exec(`
     );
 `);
 
-// DSGVO Auto-Cleanup: Logs nach 14 Tagen löschen (stündlich)
+// DSGVO Auto-Cleanup: Logs nach 14 Tagen löschen
 setInterval(() => {
     db.prepare("DELETE FROM request_logs WHERE timestamp < datetime('now', '-14 days')").run();
 }, 3600000);
@@ -183,13 +183,12 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
 
 // --- HELPER & SECURITY HASH ---
 function generateTimeHash(token) {
-    const hourBucket = Math.floor(Date.now() / (1000 * 60 * 60)); // Stündlicher Hash-Wechsel gegen Zeit-Rollback
+    const hourBucket = Math.floor(Date.now() / (1000 * 60 * 60));
     return crypto.createHmac('sha256', SECRET_KEY).update(token + hourBucket).digest('hex');
 }
 
 function verifyTimeHash(token, hash) {
     const currentHour = Math.floor(Date.now() / (1000 * 60 * 60));
-    // Prüfe aktuelle und vorherige Stunde (Toleranz bei Stundenwechsel)
     const h1 = crypto.createHmac('sha256', SECRET_KEY).update(token + currentHour).digest('hex');
     const h2 = crypto.createHmac('sha256', SECRET_KEY).update(token + (currentHour - 1)).digest('hex');
     return hash === h1 || hash === h2;
@@ -219,7 +218,6 @@ function createSession(res, userId, mode) {
     const isDashboard = mode === 'dashboard' ? 1 : 0;
     const isAdmin = mode === 'admin' ? 1 : 0;
 
-    // Haltbarkeit: Admin = 12h, Raspi/Dashboard = 24h
     const maxAge = isAdmin ? 12 * 60 * 60 : 24 * 60 * 60;
     const expires = new Date(Date.now() + maxAge * 1000);
 
@@ -248,8 +246,12 @@ function parsePostData(req) {
 }
 
 // --- UI: STARTSEITE ---
-function renderStartPage(res, userEmail = null, errorMessage = '') {
+function renderStartPage(req, res, userEmail = null, errorMessage = '') {
     const isAdmin = userEmail === ADMIN_EMAIL;
+    const host = req.headers['host'] || 'ip-whitelist.onrender.com';
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const absoluteLoginUri = `${protocol}://${host}/api/auth/google`;
+
     const html = `
     <!DOCTYPE html>
     <html lang="de">
@@ -285,7 +287,7 @@ function renderStartPage(res, userEmail = null, errorMessage = '') {
             ${errorMessage ? `<div class="error">${errorMessage}</div>` : ''}
 
             ${!userEmail ? `
-                <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/google" data-auto_prompt="false"></div>
+                <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="${absoluteLoginUri}" data-auto_prompt="false"></div>
                 <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-text="sign_in_with" data-shape="rect" data-logo_alignment="center" data-width="356"></div>
 
                 <div class="divider">ODER MIT E-MAIL</div>
@@ -299,7 +301,7 @@ function renderStartPage(res, userEmail = null, errorMessage = '') {
                         <label>Passwort</label>
                         <input type="password" name="password" required autocomplete="current-password">
                     </div>
-                    <button type="submit" class="btn btn-raspi">Anmelden / Weiter</button>
+                    <button type="submit" class="btn btn-raspi">Anmelden / Registrieren</button>
                 </form>
             ` : `
                 <form action="/api/select-mode" method="POST">
@@ -326,10 +328,10 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 2. LOGIN API (E-Mail / Passwort)
+    // 2. LOGIN API (E-Mail / Passwort) - Setzt KEIN is_raspi Token! Nur DB-User-Session für die Startseite.
     if (req.url === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
-        if (!email || !password) return renderStartPage(res, null, 'Bitte E-Mail und Passwort eingeben.');
+        if (!email || !password) return renderStartPage(req, res, null, 'Bitte E-Mail und Passwort eingeben.');
 
         let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!user) {
@@ -337,10 +339,10 @@ http.createServer(async (req, res) => {
             const result = db.prepare('INSERT INTO users (email, password_hash, auth_provider) VALUES (?, ?, ?)').run(email, hash, 'local');
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
         } else if (user.password_hash) {
-            if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(res, null, 'Passwort ist nicht korrekt.');
+            if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(req, res, null, 'Passwort ist nicht korrekt.');
         }
 
-        createSession(res, user.id, 'raspi'); // Standard-Session vor Moduswahl
+        createSession(res, user.id, 'none'); // Nur Login auf Startseite, kein Raspi/Dashboard aktiv!
         res.writeHead(302, { 'Location': '/' });
         return res.end();
     }
@@ -358,15 +360,15 @@ http.createServer(async (req, res) => {
                 user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
             }
 
-            createSession(res, user.id, 'raspi');
+            createSession(res, user.id, 'none');
             res.writeHead(302, { 'Location': '/' });
             return res.end();
         } catch (e) {
-            return renderStartPage(res, null, 'Google Login fehlgeschlagen.');
+            return renderStartPage(req, res, null, 'Google Login fehlgeschlagen.');
         }
     }
 
-    // 4. MODUS AUSWAHL (Von der Startseite)
+    // 4. MODUS AUSWAHL (Hier werden die spezifischen Tokens is_raspi / is_dashboard / is_admin gesetzt!)
     if (req.url === '/api/select-mode' && req.method === 'POST') {
         const active = getValidSession(req);
         if (!active) {
@@ -460,36 +462,13 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
-    // 6. ADMIN DASHBOARD (/admin - Verlangt zwingend Google OAuth mit info.orbit.link@gmail.com)
+    // 6. ADMIN DASHBOARD (/admin)
     if (req.url === '/admin' && req.method === 'GET') {
         const active = getValidSession(req);
         
         if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
-            const adminHtml = `
-            <!DOCTYPE html>
-            <html lang="de">
-            <head>
-                <meta charset="UTF-8">
-                <title>TITAN ADMIN — Google OAuth Login</title>
-                <script src="https://accounts.google.com/gsi/client" async defer></script>
-                <style>
-                    body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; }
-                    .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; text-align: center; }
-                    h1 { color: #f85149; margin-bottom: 16px; font-size: 1.2rem; }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <h1>🔒 ADMIN GOOGLE OAUTH ERFORDERLICH</h1>
-                    <p style="margin-bottom: 20px; color: #8b949e; font-size: 0.9rem;">Bitte mit ${ADMIN_EMAIL} anmelden.</p>
-                    <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/admin-google" data-auto_prompt="false"></div>
-                    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black"></div>
-                </div>
-            </body>
-            </html>
-            `;
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end(adminHtml);
+            return res.end("🛡️ TITAN OS: Zugriff verweigert. Admin-Berechtigung erforderlich.");
         }
 
         const users = db.prepare('SELECT * FROM users').all();
@@ -557,33 +536,6 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
-    // Admin Google OAuth Handler
-    if (req.url === '/api/auth/admin-google' && req.method === 'POST') {
-        const { credential } = await parsePostData(req);
-        try {
-            const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
-            const email = ticket.getPayload().email;
-
-            if (email !== ADMIN_EMAIL) {
-                res.writeHead(403);
-                return res.end("Unautorisiert.");
-            }
-
-            let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-            if (!user) {
-                const result = db.prepare('INSERT INTO users (email, auth_provider) VALUES (?, ?)').run(email, 'google');
-                user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
-            }
-
-            createSession(res, user.id, 'admin');
-            res.writeHead(302, { 'Location': '/admin' });
-            return res.end();
-        } catch (e) {
-            res.writeHead(403);
-            return res.end("Admin Google Auth fehlgeschlagen.");
-        }
-    }
-
     if (req.url === '/admin/ban' && req.method === 'POST') {
         const active = getValidSession(req);
         if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
@@ -596,7 +548,7 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 7. PROXY CHECK: Nur wenn is_raspi=true -> Zum Raspi durchleiten!
+    // 7. PROXY CHECK: NUR WENN is_raspi=true im Token gesetzt ist, wird zum Raspi weitergeleitet!
     const active = getValidSession(req);
     if (active && active.session.is_raspi) {
         if (active.user.traffic_used >= active.user.traffic_limit) {
@@ -608,8 +560,8 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 8. Fallback: Startseite anzeigen (mit vorausgefüllter E-Mail falls eingeloggt)
-    renderStartPage(res, active ? active.user.email : null);
+    // 8. Fallback: Startseite anzeigen
+    renderStartPage(req, res, active ? active.user.email : null);
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
