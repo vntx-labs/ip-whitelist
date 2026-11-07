@@ -166,19 +166,16 @@ http.createServer(async (req, res) => {
     const sessionData = getSessionUser(req);
     const user = sessionData ? sessionData.user : null;
 
-    // Gesperrte User abfangen (Admin ist IMMER geschützt und wird nie gesperrt!)
-    if (user && user.is_banned && user.email !== ADMIN_EMAIL && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
-        return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
+    // 1. WICHTIG: Wenn der User eine aktive Titan-Session hat (nach Klick auf "Weiter auf Titan"), 
+    // leitet der Server ALLES sofort direkt an den Raspi weiter! Kein Render-Dazwischenfunken mehr.
+    if (cookies.titan_session) {
+        if (user) req.titanUser = user;
+        return passToProxy(req, res);
     }
 
-    // Raspi-Tunnel Weiche auf /
-    if (urlPath === '/') {
-        if (!user) {
-            res.writeHead(302, { 'Location': '/login.html' });
-            return res.end();
-        }
-        req.titanUser = user;
-        return passToProxy(req, res);
+    // Gesperrte User abfangen (Admin ist ungesperrt)
+    if (user && user.is_banned && user.email !== ADMIN_EMAIL && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
+        return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
     // Auth Endpoints
@@ -283,7 +280,6 @@ http.createServer(async (req, res) => {
         }
         const { user_id, action } = await parsePostData(req);
         
-        // Sicherheits-Check: Admin kann sich selbst NIEMALS sperren!
         const targetUser = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
         if (targetUser && targetUser.email === ADMIN_EMAIL) {
             res.writeHead(302, { 'Location': '/admin.html' });
@@ -295,8 +291,8 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Statische HTML-Seiten
-    if (urlPath === '/index.html') {
+    // Statische Render-HTML-Seiten
+    if (urlPath === '/' || urlPath === '/index.html') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
             return res.end();
@@ -325,7 +321,6 @@ http.createServer(async (req, res) => {
         const usedGB = (user.traffic_used / (1024 * 1024 * 1024)).toFixed(2);
         const limitGB = (user.traffic_limit / (1024 * 1024 * 1024)).toFixed(2);
         
-        // BEHOBEN: user.id wird jetzt korrekt als Parameter übergeben!
         const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(user.id);
         const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden.</td></tr>';
         
@@ -386,7 +381,6 @@ http.createServer(async (req, res) => {
     }
 
     if (urlPath === '/api/dsgvo/delete' && user) {
-        // Admin kann sich über DSGVO-Löschung nicht selbst löschen
         if (user.email === ADMIN_EMAIL) {
             res.writeHead(302, { 'Location': '/dashboard.html' });
             return res.end();
@@ -400,8 +394,27 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end("<h1>404 Not Found</h1>");
+    // Raspi-Tunnel Aktivierung ("Weiter auf Titan" auf der Startseite)
+    if (urlPath === '/tunnel') {
+        if (!user) {
+            res.writeHead(302, { 'Location': '/login.html' });
+            return res.end();
+        }
+        const titanToken = crypto.randomBytes(32).toString('hex');
+        res.setHeader('Set-Cookie', [
+            cookie.serialize('gateway_session', cookies.gateway_session || '', { path: '/' }),
+            cookie.serialize('titan_session', titanToken, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' })
+        ]);
+        res.writeHead(302, { 'Location': '/' });
+        return res.end();
+    }
+
+    // 2. FALLBACK FÜR ALLES UNBEKANNTE: 
+    // Jede Route, die Render nicht explizit als Render-Seite kennt, wird nun restlos an den Raspi durchgereicht!
+    if (user) {
+        req.titanUser = user;
+    }
+    return passToProxy(req, res);
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
