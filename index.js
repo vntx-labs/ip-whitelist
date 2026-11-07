@@ -176,6 +176,27 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
+    // --- LOGOUT ENDPUNKT ---
+    if (urlPath === '/api/auth/logout' && (req.method === 'POST' || req.method === 'GET')) {
+        const cookies = cookie.parse(req.headers.cookie || '');
+        const token = cookies.gateway_session;
+        
+        // Session in der Datenbank löschen, falls vorhanden
+        if (token) {
+            db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+        }
+
+        // Beide Cookies (Gateway & Raspi-Tunnel) sauber löschen
+        res.setHeader('Set-Cookie', [
+            cookie.serialize('gateway_session', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' }),
+            cookie.serialize('gateway_time_hash', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' }),
+            cookie.serialize('titan_session', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' })
+        ]);
+
+        res.writeHead(302, { 'Location': '/login.html' });
+        return res.end();
+    }
+
     if (urlPath === '/api/auth/google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
