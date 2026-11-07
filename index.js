@@ -18,6 +18,7 @@ const NGROK_USER = process.env.NGROK_USER;
 const NGROK_PASS = process.env.NGROK_PASS;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "info.orbit.link@gmail.com";
+const SECRET_KEY = process.env.SECRET_KEY || crypto.randomBytes(32).toString('hex');
 
 // Sicherheits-Check beim Start
 const missingEnvs = [];
@@ -63,7 +64,6 @@ db.exec(`
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
 
-    -- DSGVO-konformes In-Memory Request-Protokoll (flüchtig)
     CREATE TABLE IF NOT EXISTS request_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -76,7 +76,7 @@ db.exec(`
     );
 `);
 
-// DSGVO Auto-Cleanup: Lösche Logs, die älter als 14 Tage sind
+// DSGVO Auto-Cleanup: Logs nach 14 Tagen löschen (stündlich)
 setInterval(() => {
     db.prepare("DELETE FROM request_logs WHERE timestamp < datetime('now', '-14 days')").run();
 }, 3600000);
@@ -97,7 +97,6 @@ async function updateWhitelist() {
             whitelist = rawData.split('\n')
                 .map(ip => ip.replace('\r', '').replace(/"/g, '').trim())
                 .filter(ip => ip.length > 0);
-            console.log(`[WHITELIST] Aktualisiert. Einträge:`, whitelist);
         }
     } catch (e) { 
         console.error("[WHITELIST] Fehler beim Laden des Gists:", e.message); 
@@ -108,7 +107,7 @@ async function updateWhitelist() {
 setInterval(updateWhitelist, 300000);
 setTimeout(updateWhitelist, 1000);
 
-// 2. DB-State über die Gist-URL laden beim Start
+// 2. DB-State laden
 async function loadDatabaseFromGist() {
     try {
         const res = await axios.get(`${GIST_DB_URL}?nocache=${Date.now()}`, { 
@@ -132,7 +131,7 @@ async function loadDatabaseFromGist() {
 }
 setTimeout(loadDatabaseFromGist, 2500);
 
-// 3. DB-State alle 60 Sekunden ins Gist sichern
+// 3. DB-State ins Gist sichern
 async function syncDatabaseToGist() {
     try {
         const users = db.prepare('SELECT * FROM users').all();
@@ -150,14 +149,13 @@ async function syncDatabaseToGist() {
             },
             timeout: 5000
         });
-        console.log("[DB Sync] Gist erfolgreich aktualisiert.");
     } catch (e) {
         console.error("[DB Sync] Fehler beim Speichern ins Gist:", e.message);
     }
 }
 setInterval(syncDatabaseToGist, 60000);
 
-// --- PROXY HEADER & TRAFFIC ZÄHLUNG (Nur für Raspi-Tunnel!) ---
+// --- PROXY HEADER & TRAFFIC ZÄHLUNG ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
     const contentType = proxyRes.headers['content-type'] || '';
     const url = req.url || '';
@@ -171,7 +169,6 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
         delete proxyRes.headers['transfer-encoding'];
     }
 
-    // Nur zählen, wenn der Nutzer im Raspi-Modus ist
     if (req.titanUser && req.titanSession.is_raspi && proxyRes.headers['content-length']) {
         const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
         db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
@@ -184,11 +181,27 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
     }
 });
 
-// --- HELPER ---
-function getSessionSession(req) {
+// --- HELPER & SECURITY HASH ---
+function generateTimeHash(token) {
+    const hourBucket = Math.floor(Date.now() / (1000 * 60 * 60)); // Stündlicher Hash-Wechsel gegen Zeit-Rollback
+    return crypto.createHmac('sha256', SECRET_KEY).update(token + hourBucket).digest('hex');
+}
+
+function verifyTimeHash(token, hash) {
+    const currentHour = Math.floor(Date.now() / (1000 * 60 * 60));
+    // Prüfe aktuelle und vorherige Stunde (Toleranz bei Stundenwechsel)
+    const h1 = crypto.createHmac('sha256', SECRET_KEY).update(token + currentHour).digest('hex');
+    const h2 = crypto.createHmac('sha256', SECRET_KEY).update(token + (currentHour - 1)).digest('hex');
+    return hash === h1 || hash === h2;
+}
+
+function getValidSession(req) {
     const cookies = cookie.parse(req.headers.cookie || '');
     const token = cookies.titan_session;
-    if (!token) return null;
+    const timeHash = cookies.titan_time_hash;
+    if (!token || !timeHash) return null;
+
+    if (!verifyTimeHash(token, timeHash)) return null;
 
     const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
     if (!session || new Date(session.expires_at) < new Date()) {
@@ -200,21 +213,25 @@ function getSessionSession(req) {
     return { session, user };
 }
 
-function createSession(res, userId, mode) { // mode: 'raspi' oder 'dashboard'
+function createSession(res, userId, mode) {
     const token = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // Nächster Tag (24h)
-    
     const isRaspi = mode === 'raspi' ? 1 : 0;
     const isDashboard = mode === 'dashboard' ? 1 : 0;
-    const user = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
-    const isAdmin = (user && user.email === ADMIN_EMAIL) ? 1 : 0;
+    const isAdmin = mode === 'admin' ? 1 : 0;
+
+    // Haltbarkeit: Admin = 12h, Raspi/Dashboard = 24h
+    const maxAge = isAdmin ? 12 * 60 * 60 : 24 * 60 * 60;
+    const expires = new Date(Date.now() + maxAge * 1000);
 
     db.prepare('INSERT INTO sessions (token, user_id, is_raspi, is_dashboard, is_admin, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(token, userId, isRaspi, isDashboard, isAdmin, expires.toISOString());
+
+    const timeHash = generateTimeHash(token);
     
-    res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
-        httpOnly: true, path: '/', maxAge: 24 * 60 * 60, sameSite: 'lax'
-    }));
+    res.setHeader('Set-Cookie', [
+        cookie.serialize('titan_session', token, { httpOnly: true, path: '/', maxAge, sameSite: 'lax' }),
+        cookie.serialize('titan_time_hash', timeHash, { httpOnly: true, path: '/', maxAge, sameSite: 'lax' })
+    ]);
 }
 
 function parsePostData(req) {
@@ -230,8 +247,9 @@ function parsePostData(req) {
     });
 }
 
-// --- UI: LOGIN / STARTSEITE ---
-function renderStartPage(res, errorMessage = '') {
+// --- UI: STARTSEITE ---
+function renderStartPage(res, userEmail = null, errorMessage = '') {
+    const isAdmin = userEmail === ADMIN_EMAIL;
     const html = `
     <!DOCTYPE html>
     <html lang="de">
@@ -251,9 +269,10 @@ function renderStartPage(res, errorMessage = '') {
             label { display: block; font-size: 0.85rem; margin-bottom: 6px; color: #8b949e; }
             input[type="email"], input[type="password"] { width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 0.9rem; }
             input:focus { border-color: #58a6ff; outline: none; }
-            .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; margin-top: 8px; font-size: 0.9rem; }
+            .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; margin-top: 8px; font-size: 0.9rem; text-decoration: none; display: block; }
             .btn-raspi { background: #238636; } .btn-raspi:hover { background: #2ea043; }
-            .btn-dash { background: #1f6feb; margin-top: 10px; } .btn-dash:hover { background: #388bfd; }
+            .btn-dash { background: #1f6feb; } .btn-dash:hover { background: #388bfd; }
+            .btn-admin { background: #da3633; } .btn-admin:hover { background: #b31d1c; }
             .divider { display: flex; align-items: center; text-align: center; margin: 20px 0; color: #484f58; font-size: 0.8rem; }
             .divider::before, .divider::after { content: ''; flex: 1; border-bottom: 1px solid #30363d; }
             .divider::before { margin-right: .5em; } .divider::after { margin-left: .5em; }
@@ -262,29 +281,33 @@ function renderStartPage(res, errorMessage = '') {
     <body>
         <div class="card">
             <h1>🛡️ TITAN GATEWAY</h1>
-            <p>Wähle deinen Modus (10 GB Traffic-Limit aktiv)</p>
+            <p>${userEmail ? `Eingeloggt als: <strong>${userEmail}</strong>` : 'Bitte anmelden oder registrieren'}</p>
             ${errorMessage ? `<div class="error">${errorMessage}</div>` : ''}
-            
-            <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/google" data-auto_prompt="false"></div>
-            <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-text="sign_in_with" data-shape="rect" data-logo_alignment="center" data-width="356"></div>
 
-            <div class="divider">ODER MIT E-MAIL</div>
+            ${!userEmail ? `
+                <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/google" data-auto_prompt="false"></div>
+                <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-text="sign_in_with" data-shape="rect" data-logo_alignment="center" data-width="356"></div>
 
-            <form action="/api/auth/login" method="POST">
-                <div class="form-group">
-                    <label>E-Mail Adresse</label>
-                    <input type="email" name="email" required autocomplete="username">
-                </div>
-                <div class="form-group">
-                    <label>Passwort</label>
-                    <input type="password" name="password" required autocomplete="current-password">
-                </div>
-                <div class="form-group">
-                    <label>Modus wählen:</label>
-                    <button type="submit" name="mode" value="raspi" class="btn btn-raspi">Zum Raspi-Tunnel weiter</button>
-                    <button type="submit" name="mode" value="dashboard" class="btn btn-dash">Zum Dashboard / Protokoll</button>
-                </div>
-            </form>
+                <div class="divider">ODER MIT E-MAIL</div>
+
+                <form action="/api/auth/login" method="POST">
+                    <div class="form-group">
+                        <label>E-Mail Adresse</label>
+                        <input type="email" name="email" required autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Passwort</label>
+                        <input type="password" name="password" required autocomplete="current-password">
+                    </div>
+                    <button type="submit" class="btn btn-raspi">Anmelden / Weiter</button>
+                </form>
+            ` : `
+                <form action="/api/select-mode" method="POST">
+                    <button type="submit" name="mode" value="raspi" class="btn btn-raspi">1. Weiter auf Titan</button>
+                    <button type="submit" name="mode" value="dashboard" class="btn btn-dash" style="margin-top:10px;">2. Weiter zum Titan Gateway Dashboard</button>
+                    ${isAdmin ? `<button type="submit" name="mode" value="admin" class="btn btn-admin" style="margin-top:10px;">3. Weiter zum Titan Gateway Admin-Dashboard</button>` : ''}
+                </form>
+            `}
         </div>
     </body>
     </html>
@@ -298,16 +321,15 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. WHITELIST CHECK: Wenn IP drin, direkt zum Raspi ohne jede Auth!
+    // 1. WHITELIST CHECK
     if (whitelist.includes(clientIp)) {
         return passToProxy(req, res);
     }
 
-    // 2. AUTH API: Login per E-Mail & Passwort
+    // 2. LOGIN API (E-Mail / Passwort)
     if (req.url === '/api/auth/login' && req.method === 'POST') {
-        const data = await parsePostData(req);
-        const { email, password, mode } = data;
-        if (!email || !password) return renderStartPage(res, 'Bitte E-Mail und Passwort eingeben.');
+        const { email, password } = await parsePostData(req);
+        if (!email || !password) return renderStartPage(res, null, 'Bitte E-Mail und Passwort eingeben.');
 
         let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!user) {
@@ -315,15 +337,15 @@ http.createServer(async (req, res) => {
             const result = db.prepare('INSERT INTO users (email, password_hash, auth_provider) VALUES (?, ?, ?)').run(email, hash, 'local');
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
         } else if (user.password_hash) {
-            if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(res, 'Ungültiges Passwort.');
+            if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(res, null, 'Passwort ist nicht korrekt.');
         }
 
-        createSession(res, user.id, mode === 'dashboard' ? 'dashboard' : 'raspi');
-        res.writeHead(302, { 'Location': mode === 'dashboard' ? '/dashboard' : '/' });
+        createSession(res, user.id, 'raspi'); // Standard-Session vor Moduswahl
+        res.writeHead(302, { 'Location': '/' });
         return res.end();
     }
 
-    // 3. AUTH API: Google Login (Standardmäßig Raspi-Modus)
+    // 3. GOOGLE OAUTH LOGIN
     if (req.url === '/api/auth/google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -340,13 +362,45 @@ http.createServer(async (req, res) => {
             res.writeHead(302, { 'Location': '/' });
             return res.end();
         } catch (e) {
-            return renderStartPage(res, 'Google Login fehlgeschlagen.');
+            return renderStartPage(res, null, 'Google Login fehlgeschlagen.');
         }
     }
 
-    // 4. USER DASHBOARD (/dashboard)
+    // 4. MODUS AUSWAHL (Von der Startseite)
+    if (req.url === '/api/select-mode' && req.method === 'POST') {
+        const active = getValidSession(req);
+        if (!active) {
+            res.writeHead(302, { 'Location': '/' });
+            return res.end();
+        }
+
+        const { user } = active;
+        const data = await parsePostData(req);
+        const mode = data.mode;
+
+        if (mode === 'raspi') {
+            createSession(res, user.id, 'raspi');
+            res.writeHead(302, { 'Location': '/' });
+            return res.end();
+        }
+        if (mode === 'dashboard') {
+            createSession(res, user.id, 'dashboard');
+            res.writeHead(302, { 'Location': '/dashboard' });
+            return res.end();
+        }
+        if (mode === 'admin' && user.email === ADMIN_EMAIL) {
+            createSession(res, user.id, 'admin');
+            res.writeHead(302, { 'Location': '/admin' });
+            return res.end();
+        }
+
+        res.writeHead(302, { 'Location': '/' });
+        return res.end();
+    }
+
+    // 5. USER DASHBOARD (/dashboard)
     if (req.url === '/dashboard' && req.method === 'GET') {
-        const active = getSessionSession(req);
+        const active = getValidSession(req);
         if (!active || !active.session.is_dashboard) {
             res.writeHead(302, { 'Location': '/' });
             return res.end();
@@ -377,14 +431,12 @@ http.createServer(async (req, res) => {
                 th { color: #58a6ff; }
                 .badge { background: #21262d; padding: 4px 8px; border-radius: 4px; color: #58a6ff; font-family: monospace; }
                 .btn-back { display: inline-block; background: #21262d; color: #58a6ff; padding: 8px 16px; border-radius: 6px; text-decoration: none; margin-bottom: 20px; border: 1px solid #30363d; }
-                .btn-admin { background: #da3633; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; float: right; font-weight: 600; }
             </style>
         </head>
         <body>
             <div class="container">
                 <a href="/" class="btn-back">← Zur Startseite</a>
-                ${user.email === ADMIN_EMAIL ? '<a href="/admin" class="btn-admin">Admin Center</a>' : ''}
-                <div class="card" style="clear: both;">
+                <div class="card">
                     <h1>🛡️ TITAN GATEWAY — Dashboard</h1>
                     <p>Anonymes Token aktiv (DSGVO-geschützt)</p>
                     <hr style="border: 0; border-top: 1px solid #30363d; margin: 16px 0;">
@@ -408,11 +460,10 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
-    // 5. ADMIN DASHBOARD (/admin - Verlangt zwingend Google OAuth mit ADMIN_EMAIL)
+    // 6. ADMIN DASHBOARD (/admin - Verlangt zwingend Google OAuth mit info.orbit.link@gmail.com)
     if (req.url === '/admin' && req.method === 'GET') {
-        const active = getSessionSession(req);
+        const active = getValidSession(req);
         
-        // Strikter Check: Ist eingeloggt, hat Admin-Flag UND ist exakt die Admin-E-Mail?
         if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
             const adminHtml = `
             <!DOCTYPE html>
@@ -429,7 +480,7 @@ http.createServer(async (req, res) => {
             </head>
             <body>
                 <div class="card">
-                    <h1>🔒 ADMIN GOOGLE AUTH ERFORDERLICH</h1>
+                    <h1>🔒 ADMIN GOOGLE OAUTH ERFORDERLICH</h1>
                     <p style="margin-bottom: 20px; color: #8b949e; font-size: 0.9rem;">Bitte mit ${ADMIN_EMAIL} anmelden.</p>
                     <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/admin-google" data-auto_prompt="false"></div>
                     <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black"></div>
@@ -461,10 +512,12 @@ http.createServer(async (req, res) => {
                 th { color: #58a6ff; }
                 .btn-ban { background: #da3633; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
                 .btn-unban { background: #238636; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+                .btn-back { display: inline-block; background: #21262d; color: #58a6ff; padding: 8px 16px; border-radius: 6px; text-decoration: none; margin-bottom: 20px; border: 1px solid #30363d; }
             </style>
         </head>
         <body>
             <div class="container">
+                <a href="/" class="btn-back">← Zur Startseite</a>
                 <div class="card">
                     <h1>⚡ TITAN ADMIN CONTROL CENTER</h1>
                     <p>Admin: <strong>${active.user.email}</strong></p>
@@ -512,8 +565,8 @@ http.createServer(async (req, res) => {
             const email = ticket.getPayload().email;
 
             if (email !== ADMIN_EMAIL) {
-                res.writeHead(403, { 'Content-Type': 'text/plain' });
-                return res.end("Unautorisiert: Nur der Admin darf diesen Bereich betreten.");
+                res.writeHead(403);
+                return res.end("Unautorisiert.");
             }
 
             let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
@@ -522,16 +575,7 @@ http.createServer(async (req, res) => {
                 user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
             }
 
-            // Admin-Session erstellen (is_admin = 1, is_raspi = 0, is_dashboard = 0)
-            const token = crypto.randomBytes(32).toString('hex');
-            const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
-            db.prepare('INSERT INTO sessions (token, user_id, is_raspi, is_dashboard, is_admin, expires_at) VALUES (?, ?, 0, 0, 1, ?)')
-              .run(token, user.id, expires.toISOString());
-            
-            res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
-                httpOnly: true, path: '/', maxAge: 24 * 60 * 60, sameSite: 'lax'
-            }));
-
+            createSession(res, user.id, 'admin');
             res.writeHead(302, { 'Location': '/admin' });
             return res.end();
         } catch (e) {
@@ -541,7 +585,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.url === '/admin/ban' && req.method === 'POST') {
-        const active = getSessionSession(req);
+        const active = getValidSession(req);
         if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
             return res.end("Unauthorized");
@@ -552,8 +596,8 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 6. PROXY CHECK: Wenn der Nutzer ein gültiges Raspi-Token hat -> Zum Tunnel durchleiten!
-    const active = getSessionSession(req);
+    // 7. PROXY CHECK: Nur wenn is_raspi=true -> Zum Raspi durchleiten!
+    const active = getValidSession(req);
     if (active && active.session.is_raspi) {
         if (active.user.traffic_used >= active.user.traffic_limit) {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -564,8 +608,8 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 7. Fallback: Zeige die Startseite
-    renderStartPage(res);
+    // 8. Fallback: Startseite anzeigen (mit vorausgefüllter E-Mail falls eingeloggt)
+    renderStartPage(res, active ? active.user.email : null);
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
