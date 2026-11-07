@@ -20,7 +20,6 @@ const NGROK_USER = process.env.NGROK_USER;
 const NGROK_PASS = process.env.NGROK_PASS;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "info.orbit.link@gmail.com";
-const SECRET_KEY = process.env.SECRET_KEY || crypto.randomBytes(32).toString('hex');
 
 const missingEnvs = [];
 if (!GIST_WHITELIST_URL) missingEnvs.push('GIST_WHITELIST_URL');
@@ -149,15 +148,28 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. Whitelist: Sofort hart zum Raspi-Tunnel durchleiten
+    // 1. Whitelist-Check: Sofort hart zum Raspi-Tunnel durchleiten
     if (whitelist.includes(clientIp)) {
         return passToProxy(req, res);
     }
 
-    const user = getSessionUser(req);
+    const cookies = cookie.parse(req.headers.cookie || '');
     const urlPath = req.url.split('?')[0];
 
-    // 2. Auth Endpoints
+    // 2. ROOT ROUTE (/) Weiche: Wenn titan_session Cookie aktiv ist -> Zum Raspi proxyn! Ansonsten zu index.html
+    if (urlPath === '/') {
+        if (cookies.titan_session) {
+            const user = getSessionUser(req);
+            if (user) {
+                req.titanUser = user;
+                return passToProxy(req, res);
+            }
+        }
+        res.writeHead(302, { 'Location': '/index.html' });
+        return res.end();
+    }
+
+    // 3. Auth Endpoints
     if (urlPath === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         let u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
@@ -172,28 +184,7 @@ http.createServer(async (req, res) => {
         const token = crypto.randomBytes(32).toString('hex');
         db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, u.id, new Date(Date.now() + 86400000).toISOString());
         res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 86400, sameSite: 'lax' }));
-        res.writeHead(302, { 'Location': '/' });
-        return res.end();
-    }
-
-    // --- LOGOUT ENDPUNKT ---
-    if (urlPath === '/api/auth/logout' && (req.method === 'POST' || req.method === 'GET')) {
-        const cookies = cookie.parse(req.headers.cookie || '');
-        const token = cookies.gateway_session;
-        
-        // Session in der Datenbank löschen, falls vorhanden
-        if (token) {
-            db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-        }
-
-        // Beide Cookies (Gateway & Raspi-Tunnel) sauber löschen
-        res.setHeader('Set-Cookie', [
-            cookie.serialize('gateway_session', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' }),
-            cookie.serialize('gateway_time_hash', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' }),
-            cookie.serialize('titan_session', '', { httpOnly: true, path: '/', maxAge: 0, sameSite: 'lax' })
-        ]);
-
-        res.writeHead(302, { 'Location': '/login.html' });
+        res.writeHead(302, { 'Location': '/index.html' });
         return res.end();
     }
 
@@ -210,7 +201,7 @@ http.createServer(async (req, res) => {
             const token = crypto.randomBytes(32).toString('hex');
             db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, u.id, new Date(Date.now() + 86400000).toISOString());
             res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 86400, sameSite: 'lax' }));
-            res.writeHead(302, { 'Location': '/' });
+            res.writeHead(302, { 'Location': '/index.html' });
             return res.end();
         } catch (e) {
             res.writeHead(302, { 'Location': '/login.html?error=google_failed' });
@@ -218,8 +209,46 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // 3. Statische HTML-Seiten & Sicherheitswächter
-    if (urlPath === '/' || urlPath === '/index.html') {
+    // Admin Google OAuth Handler (für direkten Login auf der Admin-Seite)
+    if (urlPath === '/api/auth/admin-google' && req.method === 'POST') {
+        const { credential } = await parsePostData(req);
+        try {
+            const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+            const email = ticket.getPayload().email;
+            if (email !== ADMIN_EMAIL) {
+                res.writeHead(403);
+                return res.end("Unautorisiert: Nur für den Admin.");
+            }
+            let u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+            if (!u) {
+                const r = db.prepare('INSERT INTO users (email, auth_provider) VALUES (?, ?)').run(email, 'google');
+                u = db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
+            }
+            const token = crypto.randomBytes(32).toString('hex');
+            db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, u.id, new Date(Date.now() + 86400000).toISOString());
+            res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 86400, sameSite: 'lax' }));
+            res.writeHead(302, { 'Location': '/admin.html' });
+            return res.end();
+        } catch (e) {
+            res.writeHead(403);
+            return res.end("Admin Google Auth fehlgeschlagen.");
+        }
+    }
+
+    // Logout
+    if (urlPath === '/api/auth/logout') {
+        res.setHeader('Set-Cookie', [
+            cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }),
+            cookie.serialize('titan_session', '', { maxAge: 0, path: '/' })
+        ]);
+        res.writeHead(302, { 'Location': '/login.html' });
+        return res.end();
+    }
+
+    // 4. Statische HTML-Seiten & Wächter
+    const user = getSessionUser(req);
+
+    if (urlPath === '/index.html') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
             return res.end();
@@ -229,10 +258,15 @@ http.createServer(async (req, res) => {
 
     if (urlPath === '/login.html') {
         if (user) {
-            res.writeHead(302, { 'Location': '/' });
+            res.writeHead(302, { 'Location': '/index.html' });
             return res.end();
         }
-        return serveFile(res, 'public/login.html', { '{{GOOGLE_CLIENT_ID}}': GOOGLE_CLIENT_ID });
+        const host = req.headers['host'] || 'ip-whitelist.onrender.com';
+        const protocol = req.headers['x-forwarded-proto'] || 'https';
+        return serveFile(res, 'public/login.html', { 
+            '{{GOOGLE_CLIENT_ID}}': GOOGLE_CLIENT_ID,
+            '{{LOGIN_URI}}': `${protocol}://${host}/api/auth/google`
+        });
     }
 
     if (urlPath === '/dashboard.html') {
@@ -243,47 +277,56 @@ http.createServer(async (req, res) => {
         const usedGB = (user.traffic_used / (1024 * 1024 * 1024)).toFixed(2);
         const limitGB = (user.traffic_limit / (1024 * 1024 * 1024)).toFixed(2);
         const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all();
-        const logsHtml = logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('');
+        const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden.</td></tr>';
         
         return serveFile(res, 'public/dashboard.html', { '{{USER_EMAIL}}': user.email, '{{USED_GB}}': usedGB, '{{LIMIT_GB}}': limitGB, '{{LOGS}}': logsHtml });
     }
 
     if (urlPath === '/admin.html') {
+        // Wenn nicht eingeloggt oder nicht Admin -> Zeige OAuth Admin-Login-Seite statt 403!
         if (!user || user.email !== ADMIN_EMAIL) {
-            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end("<h1>403 Forbidden</h1><p>Nur für den Administrator erlaubt.</p>");
+            const host = req.headers['host'] || 'ip-whitelist.onrender.com';
+            const protocol = req.headers['x-forwarded-proto'] || 'https';
+            return serveFile(res, 'public/admin_login.html', {
+                '{{GOOGLE_CLIENT_ID}}': GOOGLE_CLIENT_ID,
+                '{{ADMIN_LOGIN_URI}}': `${protocol}://${host}/api/auth/admin-google`,
+                '{{ADMIN_EMAIL}}': ADMIN_EMAIL
+            });
         }
         const users = db.prepare('SELECT * FROM users').all();
         const usersHtml = users.map(u => `<tr><td>${u.id}</td><td>${u.email}</td><td>${u.is_banned ? 'Gesperrt' : 'Aktiv'}</td></tr>`).join('');
         return serveFile(res, 'public/admin.html', { '{{USERS}}': usersHtml });
     }
 
-    // 4. DSGVO Endpoints (Berichtigung / Löschung)
+    // DSGVO Löschung
     if (urlPath === '/api/dsgvo/delete' && user) {
         db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
-        res.setHeader('Set-Cookie', cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }));
+        res.setHeader('Set-Cookie', [
+            cookie.serialize('gateway_session', '', { maxAge: 0, path: '/' }),
+            cookie.serialize('titan_session', '', { maxAge: 0, path: '/' })
+        ]);
         res.writeHead(302, { 'Location': '/login.html' });
         return res.end();
     }
 
-    // 5. Weiterleitung zum Raspi (Wird nur aufgerufen, wenn man aktiv auf "Weiter auf Titan" klickt)
+    // Raspi-Tunnel Aktivierung ("Weiter auf Titan")
     if (urlPath === '/tunnel') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
             return res.end();
         }
-        // Aktiviere temporären titan_session Cookie für den Tunnel
         const titanToken = crypto.randomBytes(32).toString('hex');
         res.setHeader('Set-Cookie', [
-            cookie.serialize('gateway_session', req.headers.cookie ? cookie.parse(req.headers.cookie).gateway_session || '' : '', { path: '/' }),
+            cookie.serialize('gateway_session', cookies.gateway_session || '', { path: '/' }),
             cookie.serialize('titan_session', titanToken, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' })
         ]);
         res.writeHead(302, { 'Location': '/' });
         return res.end();
     }
 
-    // Fallback Proxy
-    return passToProxy(req, res);
+    // Wenn keine Route greift -> Sauberes 404 statt Proxy-Fehler!
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end("<h1>404 Not Found</h1><p>Die angeforderte Seite existiert nicht.</p>");
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
@@ -310,7 +353,7 @@ function passToProxy(req, res) {
         changeOrigin: true,
         headers: {
             "Authorization": authHeader,
-            "ngrok-skip-browser-warning": "true",
+            "ngrok-ngrok-skip-browser-warning": "true",
             "X-Protected": "True",
             "Accept-Encoding": "identity" 
         }
