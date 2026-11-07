@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>TITAN — Admin</title>
+    <style>
+        body { background: #0d1117; color: #c9d1d9; padding: 40px; font-family: sans-serif; }
+        .container { max-width: 900px; margin: auto; background: #161b22; padding: 24px; border-radius: 12px; border: 1px solid #30363d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #30363d; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" style="color: #58a6ff; text-decoration: none;">← Zurück</a>
+        <h1 style="color: #f85149;">⚡ Admin Control Center</h1>
+        <table>
+            <tr><th>ID</th><th>E-Mail</th><th>Status</th></tr>
+            {{USERS}}
+        </table>
+    </div>
+</body>
+</html>
