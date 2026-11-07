@@ -88,23 +88,28 @@ setInterval(() => {
 
 const proxy = httpProxy.createProxyServer({});
 
-// --- TRAFFIC-ZÄHLER & LOGGING IM PROXY ---
+// --- DETAILLIERTES TRAFFIC- & URL-LOGGING ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
-    if (req.titanUser && proxyRes.headers['content-length']) {
+    // Wenn ein authentifizierter Nutzer den Proxy passiert
+    if (req.titanUser) {
+        // Bytes ermitteln (falls content-length vorhanden, sonst 0)
         const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
         
-        // Traffic auf das Nutzerkonto addieren
-        db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
+        // 1. Traffic-Zähler des Nutzers erhöhen
+        if (bytes > 0) {
+            db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
+        }
         
-        // IP ermitteln
+        // 2. Client-IP bereinigen
         let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
         if (clientIp && clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
         
-        // In request_logs eintragen (DSGVO-konform, nach 14 Tagen auto-gelöscht oder manuell löschbar)
+        // 3. Exakten URL-Pfad, Methode und Bandbreite in request_logs festhalten
         db.prepare('INSERT INTO request_logs (user_id, method, url, ip, bytes_transferred) VALUES (?, ?, ?, ?, ?)')
           .run(req.titanUser.id, req.method, req.url, clientIp, bytes);
     }
 });
+
 let whitelist = [];
 
 async function updateWhitelist() {
@@ -349,12 +354,16 @@ http.createServer(async (req, res) => {
         const usedGB = (user.traffic_used / (1024 * 1024 * 1024)).toFixed(2);
         const limitGB = (user.traffic_limit / (1024 * 1024 * 1024)).toFixed(2);
         
-        const logs = db.prepare('SELECT method, url, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(user.id);
-        const logsHtml = logs.length > 0 ? logs.map(l => `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td></tr>`).join('') : '<tr><td colspan="3">Keine Logs vorhanden (DSGVO-konform gelöscht).</td></tr>';
+        // Abfrage holt nun auch bytes_transferred mit ab
+        const logs = db.prepare('SELECT method, url, bytes_transferred, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(user.id);
+        
+        const logsHtml = logs.length > 0 ? logs.map(l => {
+            const kbSize = (l.bytes_transferred / 1024).toFixed(1);
+            return `<tr><td>${l.timestamp}</td><td>${l.method}</td><td>${l.url}</td><td>${kbSize} KB</td></tr>`;
+        }).join('') : '<tr><td colspan="4">Keine Logs vorhanden.</td></tr>';
         
         return serveFile(res, 'public/dashboard.html', { '{{USER_EMAIL}}': user.email, '{{USED_GB}}': usedGB, '{{LIMIT_GB}}': limitGB, '{{LOGS}}': logsHtml });
     }
-
     if (urlPath === '/admin.html') {
         if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             const host = req.headers['host'] || 'ip-whitelist.onrender.com';
@@ -426,7 +435,7 @@ http.createServer(async (req, res) => {
     // 3. RASPI = / (und alles, was der Raspi anfragt, wenn die Session aktiv ist oder standardmäßig auf / zugreift)
     if (urlPath === '/' || cookies.titan_session) {
         if (user) {
-            req.titanUser = user; // <--- Das ist der Schlüssel für den Zähler!
+            req.titanUser = user; // WICHTIG für den Logger!
         }
         return passToProxy(req, res);
     }
