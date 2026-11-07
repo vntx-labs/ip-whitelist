@@ -2,22 +2,37 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
-    <title>TITAN — Admin</title>
+    <title>TITAN — Admin Control Center</title>
     <style>
         body { background: #0d1117; color: #c9d1d9; padding: 40px; font-family: sans-serif; }
-        .container { max-width: 900px; margin: auto; background: #161b22; padding: 24px; border-radius: 12px; border: 1px solid #30363d; }
+        .container { max-width: 1000px; margin: auto; }
+        .card { background: #161b22; padding: 24px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 30px; }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
         th, td { text-align: left; padding: 8px; border-bottom: 1px solid #30363d; color: #8b949e; }
+        th { color: #58a6ff; }
     </style>
 </head>
 <body>
     <div class="container">
-        <a href="/" style="color: #58a6ff; text-decoration: none;">← Zurück</a>
-        <h1 style="color: #f85149;">⚡ Admin Control Center</h1>
-        <table>
-            <tr><th>ID</th><th>E-Mail</th><th>Status</th></tr>
-            {{USERS}}
-        </table>
+        <a href="/" style="color: #58a6ff; text-decoration: none;">← Zur Startseite</a>
+        <h1 style="color: #f85149; margin-top: 15px;">⚡ Admin Control Center</h1>
+        <p style="color: #8b949e; margin-bottom: 20px;">Eingeloggt als Admin: {{ADMIN_EMAIL}}</p>
+
+        <div class="card">
+            <h2>🆘 Offene Hilfe-Tickets (Sperr-Beschwerden)</h2>
+            <table>
+                <tr><th>Zeit</th><th>Absender</th><th>Nachricht</th><th>Aktion</th></tr>
+                {{TICKETS}}
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>👥 Benutzer-Verwaltung & Missbrauchs-Kontrolle</h2>
+            <table>
+                <tr><th>ID</th><th>E-Mail</th><th>Status</th><th>Aktion</th></tr>
+                {{USERS}}
+            </table>
+        </div>
     </div>
 </body>
 </html>
