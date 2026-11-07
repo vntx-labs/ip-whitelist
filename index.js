@@ -410,7 +410,7 @@ http.createServer(async (req, res) => {
 function serveFile(res, filePath, replacements = {}) {
     const fullPath = path.join(__dirname, filePath);
     fs.readFile(fullPath, 'utf8', (err, content) => {
-        if, err {
+        if (err) {
             res.writeHead(404, { 'Content-Type': 'text/plain' });
             return res.end('Datei nicht gefunden.');
         }
