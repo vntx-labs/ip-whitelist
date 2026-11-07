@@ -167,23 +167,19 @@ http.createServer(async (req, res) => {
     const sessionData = getSessionUser(req);
     const user = sessionData ? sessionData.user : null;
 
-    // Wenn der Nutzer gesperrt ist, zeige IMMER die Bann-Seite (außer er ruft /help.html oder das Formular auf)
+    // Wenn der Nutzer gesperrt ist, zeige IMMER die Bann-Seite
     if (user && user.is_banned && urlPath !== '/help.html' && urlPath !== '/api/help/submit' && urlPath !== '/api/auth/logout') {
         return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
-    // 2. Raspi-Tunnel Weiche: Wenn titan_session Cookie aktiv ist -> Zum Raspi proxyn!
-    if (urlPath === '/' && cookies.titan_session) {
-        if (user) req.titanUser = user;
-        return passToProxy(req, res);
-    }
-
-    if (urlPath === '/' || urlPath === '/index.html') {
+    // 2. RASPI = / -> Wenn der Nutzer auf / zugreift, leiten wir direkt zum Raspi weiter!
+    if (urlPath === '/') {
         if (!user) {
             res.writeHead(302, { 'Location': '/login.html' });
             return res.end();
         }
-        return serveFile(res, 'public/index.html', { '{{USER_EMAIL}}': user.email, '{{IS_ADMIN_USER}}': user.email === ADMIN_EMAIL ? 'true' : 'false' });
+        req.titanUser = user;
+        return passToProxy(req, res);
     }
 
     // 3. Auth Endpoints
@@ -226,7 +222,7 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // Admin Google OAuth Handler (Zwingendes zweites OAuth direkt für Admin)
+    // ADMIN GOOGLE OAUTH HANDLER (Zwingendes zweites OAuth direkt für admin.html)
     if (urlPath === '/api/auth/admin-google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -242,6 +238,7 @@ http.createServer(async (req, res) => {
                 u = db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
             }
             const token = crypto.randomBytes(32).toString('hex');
+            // Setzt explizit is_admin_session = 1
             db.prepare('INSERT INTO sessions (token, user_id, is_admin_session, expires_at) VALUES (?, ?, 1, ?)').run(token, u.id, new Date(Date.now() + 3600000).toISOString());
             res.setHeader('Set-Cookie', cookie.serialize('gateway_session', token, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' }));
             res.writeHead(302, { 'Location': '/admin.html' });
@@ -273,9 +270,9 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Admin Ticket abhaken/löschen
+    // Admin Ticket abhaken
     if (urlPath === '/api/admin/resolve-ticket' && req.method === 'POST') {
-        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
+        if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
             return res.end("Unauthorized");
         }
@@ -287,7 +284,7 @@ http.createServer(async (req, res) => {
 
     // Admin Konto sperren / entsperren
     if (urlPath === '/api/admin/ban' && req.method === 'POST') {
-        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
+        if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
             return res.end("Unauthorized");
         }
@@ -297,7 +294,15 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 4. Statische HTML-Seiten
+    // 4. Statische HTML-Seiten Routing
+    if (urlPath === '/index.html') {
+        if (!user) {
+            res.writeHead(302, { 'Location': '/login.html' });
+            return res.end();
+        }
+        return serveFile(res, 'public/index.html', { '{{USER_EMAIL}}': user.email, '{{IS_ADMIN_USER}}': user.email === ADMIN_EMAIL ? 'true' : 'false' });
+    }
+
     if (urlPath === '/login.html') {
         if (user) {
             res.writeHead(302, { 'Location': '/index.html' });
@@ -325,8 +330,8 @@ http.createServer(async (req, res) => {
     }
 
     if (urlPath === '/admin.html') {
-        // Prüfen ob Admin-Session aktiv
-        if (!sessionData || !sessionData.session.is_admin || user.email !== ADMIN_EMAIL) {
+        // Prüfen ob die aktive Session eine Admin-Session ist
+        if (!sessionData || !sessionData.session.is_admin_session || user.email !== ADMIN_EMAIL) {
             const host = req.headers['host'] || 'ip-whitelist.onrender.com';
             const protocol = req.headers['x-forwarded-proto'] || 'https';
             return serveFile(res, 'public/admin_login.html', {
@@ -373,7 +378,7 @@ http.createServer(async (req, res) => {
         return serveFile(res, 'public/help.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
-    // DSGVO Berichtigung / Löschung
+    // DSGVO Löschung
     if (urlPath === '/api/dsgvo/delete' && user) {
         db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
         res.setHeader('Set-Cookie', [
@@ -384,22 +389,7 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // Raspi-Tunnel Aktivierung ("Weiter auf Titan")
-    if (urlPath === '/tunnel') {
-        if (!user) {
-            res.writeHead(302, { 'Location': '/login.html' });
-            return res.end();
-        }
-        const titanToken = crypto.randomBytes(32).toString('hex');
-        res.setHeader('Set-Cookie', [
-            cookie.serialize('gateway_session', cookies.gateway_session || '', { path: '/' }),
-            cookie.serialize('titan_session', titanToken, { httpOnly: true, path: '/', maxAge: 3600, sameSite: 'lax' })
-        ]);
-        res.writeHead(302, { 'Location': '/' });
-        return res.end();
-    }
-
-    // Wenn keine Route greift -> Sauberes 404
+    // Wenn absolut keine Route passt -> 404 (Schützt vor jeglichem 502 Bad Gateway)
     res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end("<h1>404 Not Found</h1>");
 
