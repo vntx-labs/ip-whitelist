@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>TITAN — Admin Login</title>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <style>
+        body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 380px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2 style="color: #f85149;">🔒 Admin Google Auth</h2>
+        <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 20px;">Nur für {{ADMIN_EMAIL}}</p>
+        
+        <div id="g_id_onload" data-client_id="{{GOOGLE_CLIENT_ID}}" data-login_uri="{{ADMIN_LOGIN_URI}}" data-auto_prompt="false"></div>
+        <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-width="316"></div>
+        
+        <br><br>
+        <a href="/index.html" style="color: #58a6ff; text-decoration: none; font-size: 0.85rem;">← Zurück zur Startseite</a>
+    </div>
+</body>
+</html>
