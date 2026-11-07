@@ -89,7 +89,10 @@ setTimeout(updateWhitelist, 1000);
 // 2. DB-State über die Gist-URL laden beim Start
 async function loadDatabaseFromGist() {
     try {
-        const res = await axios.get(`${GIST_DB_URL}?nocache=${Date.now()}`, { timeout: 5000 });
+        const res = await axios.get(`${GIST_DB_URL}?nocache=${Date.now()}`, { 
+            headers: { Authorization: `Bearer ${GITHUB_TOKEN.trim()}` },
+            timeout: 5000 
+        });
         if (res.data && res.data.users) {
             const insertUser = db.prepare('INSERT OR REPLACE INTO users (id, email, password_hash, auth_provider, traffic_used, traffic_limit, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
             for (const u of res.data.users || []) {
@@ -102,40 +105,38 @@ async function loadDatabaseFromGist() {
             console.log(`[DB] ${res.data.users.length} Nutzer via Gist-URL in den RAM geladen.`);
         }
     } catch (e) {
-        console.error("[DB] Konnte Gist-DB via URL nicht laden (initial leer?):", e.message);
+        const errorDetails = e.response ? JSON.stringify(e.response.data) : e.message;
+        console.error("[DB] Konnte Gist-DB via URL nicht laden:", errorDetails);
     }
 }
 setTimeout(loadDatabaseFromGist, 2500);
 
-// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern (Traffic-Zähler & neue User)
-// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern (mit präzisem Fehler-Log)
+// 3. DB-State alle 60 Sekunden via PATCH-API ins Gist sichern (Rate-Limit geschont & Token garantiert)
 async function syncDatabaseToGist() {
     try {
         const users = db.prepare('SELECT * FROM users').all();
         const sessions = db.prepare('SELECT * FROM sessions').all();
         const payload = JSON.stringify({ users, sessions }, null, 2);
 
-        // Beim Sync & beim Laden des Gists:
         await axios.patch(GIST_PATCH_API_URL, {
             files: {
                 'titan_users.json': { content: payload }
             }
         }, {
             headers: { 
-                // Falls 'token' gezickt hat, nutzen wir den Standard-Bearer oder prüfen das Env
-                Authorization: `Bearer ${process.env.GITHUB_TOKEN}` 
+                Authorization: `Bearer ${GITHUB_TOKEN.trim()}`,
+                'User-Agent': 'Titan-Gateway'
             },
             timeout: 5000
         });
         console.log("[DB Sync] Gist erfolgreich aktualisiert.");
     } catch (e) {
-        // Hier ziehen wir die exakte Fehlermeldung aus der GitHub-Antwort heraus
         const errorDetails = e.response ? JSON.stringify(e.response.data) : e.message;
         const statusCode = e.response ? e.response.status : 'Kein Status';
         console.error(`[DB Sync] Fehler ${statusCode} beim Speichern ins Gist:`, errorDetails);
     }
 }
-setInterval(syncDatabaseToGist, 10000); // Alle 10 Sekunden
+setInterval(syncDatabaseToGist, 60000); // Auf 60 Sekunden erhöht, um GitHub Rate-Limits sicher zu umgehen
 
 // --- PROXY HEADER & TRAFFIC ZÄHLUNG ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
