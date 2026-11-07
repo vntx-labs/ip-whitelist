@@ -56,6 +56,9 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
         token TEXT PRIMARY KEY,
         user_id INTEGER,
+        is_raspi INTEGER DEFAULT 0,
+        is_dashboard INTEGER DEFAULT 0,
+        is_admin INTEGER DEFAULT 0,
         expires_at DATETIME,
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
@@ -73,7 +76,7 @@ db.exec(`
     );
 `);
 
-// DSGVO Auto-Cleanup: Lösche Logs, die älter als 14 Tage sind (stündlich)
+// DSGVO Auto-Cleanup: Lösche Logs, die älter als 14 Tage sind
 setInterval(() => {
     db.prepare("DELETE FROM request_logs WHERE timestamp < datetime('now', '-14 days')").run();
 }, 3600000);
@@ -83,7 +86,7 @@ const proxy = httpProxy.createProxyServer({});
 let whitelist = [];
 let isUpdatingWhitelist = false;
 
-// 1. IP-Whitelist via URL laden (Hintergrund-Intervall alle 5 Min.)
+// 1. IP-Whitelist via URL laden
 async function updateWhitelist() {
     if (isUpdatingWhitelist) return;
     isUpdatingWhitelist = true;
@@ -102,7 +105,7 @@ async function updateWhitelist() {
         isUpdatingWhitelist = false;
     }
 }
-setInterval(updateWhitelist, 300000); // 5 Minuten
+setInterval(updateWhitelist, 300000);
 setTimeout(updateWhitelist, 1000);
 
 // 2. DB-State über die Gist-URL laden beim Start
@@ -117,20 +120,19 @@ async function loadDatabaseFromGist() {
             for (const u of res.data.users || []) {
                 insertUser.run(u.id, u.email, u.password_hash, u.auth_provider, u.traffic_used, u.traffic_limit, u.is_banned || 0, u.created_at);
             }
-            const insertSession = db.prepare('INSERT OR REPLACE INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)');
+            const insertSession = db.prepare('INSERT OR REPLACE INTO sessions (token, user_id, is_raspi, is_dashboard, is_admin, expires_at) VALUES (?, ?, ?, ?, ?, ?)');
             for (const s of res.data.sessions || []) {
-                insertSession.run(s.token, s.user_id, s.expires_at);
+                insertSession.run(s.token, s.user_id, s.is_raspi || 0, s.is_dashboard || 0, s.is_admin || 0, s.expires_at);
             }
             console.log(`[DB] ${res.data.users.length} Nutzer via Gist-URL in den RAM geladen.`);
         }
     } catch (e) {
-        const errorDetails = e.response ? JSON.stringify(e.response.data) : e.message;
-        console.error("[DB] Konnte Gist-DB via URL nicht laden:", errorDetails);
+        console.error("[DB] Konnte Gist-DB via URL nicht laden:", e.message);
     }
 }
 setTimeout(loadDatabaseFromGist, 2500);
 
-// 3. DB-State alle 60 Sekunden via PATCH-API ins Gist sichern
+// 3. DB-State alle 60 Sekunden ins Gist sichern
 async function syncDatabaseToGist() {
     try {
         const users = db.prepare('SELECT * FROM users').all();
@@ -150,14 +152,12 @@ async function syncDatabaseToGist() {
         });
         console.log("[DB Sync] Gist erfolgreich aktualisiert.");
     } catch (e) {
-        const errorDetails = e.response ? JSON.stringify(e.response.data) : e.message;
-        const statusCode = e.response ? e.response.status : 'Kein Status';
-        console.error(`[DB Sync] Fehler ${statusCode} beim Speichern ins Gist:`, errorDetails);
+        console.error("[DB Sync] Fehler beim Speichern ins Gist:", e.message);
     }
 }
-setInterval(syncDatabaseToGist, 60000); // 60 Sekunden
+setInterval(syncDatabaseToGist, 60000);
 
-// --- PROXY HEADER & TRAFFIC ZÄHLUNG ---
+// --- PROXY HEADER & TRAFFIC ZÄHLUNG (Nur für Raspi-Tunnel!) ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
     const contentType = proxyRes.headers['content-type'] || '';
     const url = req.url || '';
@@ -171,8 +171,8 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
         delete proxyRes.headers['transfer-encoding'];
     }
 
-    // Wenn es ein angemeldeter Nutzer ist, Traffic zählen und Request loggen
-    if (req.titanUser && proxyRes.headers['content-length']) {
+    // Nur zählen, wenn der Nutzer im Raspi-Modus ist
+    if (req.titanUser && req.titanSession.is_raspi && proxyRes.headers['content-length']) {
         const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
         db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
         
@@ -184,27 +184,36 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
     }
 });
 
-// --- HELPER HANDLERS ---
-function getSessionUser(req) {
+// --- HELPER ---
+function getSessionSession(req) {
     const cookies = cookie.parse(req.headers.cookie || '');
     const token = cookies.titan_session;
     if (!token) return null;
 
-    const session = db.prepare('SELECT user_id, expires_at FROM sessions WHERE token = ?').get(token);
+    const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
     if (!session || new Date(session.expires_at) < new Date()) {
         if (session) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
         return null;
     }
-    return db.prepare('SELECT * FROM users WHERE id = ?').get(session.user_id);
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.user_id);
+    if (!user || user.is_banned) return null;
+    return { session, user };
 }
 
-function createSession(res, userId) {
+function createSession(res, userId, mode) { // mode: 'raspi' oder 'dashboard'
     const token = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 Tage
-    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires.toISOString());
+    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // Nächster Tag (24h)
+    
+    const isRaspi = mode === 'raspi' ? 1 : 0;
+    const isDashboard = mode === 'dashboard' ? 1 : 0;
+    const user = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
+    const isAdmin = (user && user.email === ADMIN_EMAIL) ? 1 : 0;
+
+    db.prepare('INSERT INTO sessions (token, user_id, is_raspi, is_dashboard, is_admin, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(token, userId, isRaspi, isDashboard, isAdmin, expires.toISOString());
     
     res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
-        httpOnly: true, path: '/', maxAge: 30 * 24 * 60 * 60, sameSite: 'lax'
+        httpOnly: true, path: '/', maxAge: 24 * 60 * 60, sameSite: 'lax'
     }));
 }
 
@@ -221,29 +230,30 @@ function parsePostData(req) {
     });
 }
 
-// --- LOGIN SEITE UI ---
-function renderLoginPage(res, errorMessage = '') {
+// --- UI: LOGIN / STARTSEITE ---
+function renderStartPage(res, errorMessage = '') {
     const html = `
     <!DOCTYPE html>
     <html lang="de">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>TITAN GATEWAY — Login</title>
+        <title>TITAN GATEWAY — Startseite</title>
         <script src="https://accounts.google.com/gsi/client" async defer></script>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
             body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-            .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 100%; max-width: 400px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-            .card h1 { font-size: 1.5rem; color: #58a6ff; margin-bottom: 8px; text-align: center; }
-            .card p { font-size: 0.875rem; color: #8b949e; margin-bottom: 24px; text-align: center; }
-            .error { background: rgba(248, 81, 73, 0.1); border: 1px solid #f85149; color: #f85149; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 16px; text-align: center; }
-            .form-group { margin-bottom: 16px; }
+            .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 100%; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
+            h1 { font-size: 1.5rem; color: #58a6ff; margin-bottom: 8px; }
+            p { font-size: 0.875rem; color: #8b949e; margin-bottom: 24px; }
+            .error { background: rgba(248, 81, 73, 0.1); border: 1px solid #f85149; color: #f85149; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 16px; }
+            .form-group { margin-bottom: 16px; text-align: left; }
             label { display: block; font-size: 0.85rem; margin-bottom: 6px; color: #8b949e; }
             input[type="email"], input[type="password"] { width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 0.9rem; }
             input:focus { border-color: #58a6ff; outline: none; }
-            .btn { width: 100%; padding: 10px; background: #238636; border: none; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; margin-top: 8px; font-size: 0.9rem; }
-            .btn:hover { background: #2ea043; }
+            .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; color: #fff; font-weight: 600; cursor: pointer; margin-top: 8px; font-size: 0.9rem; }
+            .btn-raspi { background: #238636; } .btn-raspi:hover { background: #2ea043; }
+            .btn-dash { background: #1f6feb; margin-top: 10px; } .btn-dash:hover { background: #388bfd; }
             .divider { display: flex; align-items: center; text-align: center; margin: 20px 0; color: #484f58; font-size: 0.8rem; }
             .divider::before, .divider::after { content: ''; flex: 1; border-bottom: 1px solid #30363d; }
             .divider::before { margin-right: .5em; } .divider::after { margin-left: .5em; }
@@ -252,11 +262,11 @@ function renderLoginPage(res, errorMessage = '') {
     <body>
         <div class="card">
             <h1>🛡️ TITAN GATEWAY</h1>
-            <p>10 GB Gratis-Kontingent aktiv. Bitte anmelden.</p>
+            <p>Wähle deinen Modus (10 GB Traffic-Limit aktiv)</p>
             ${errorMessage ? `<div class="error">${errorMessage}</div>` : ''}
             
             <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/google" data-auto_prompt="false"></div>
-            <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-text="sign_in_with" data-shape="rect" data-logo_alignment="left" data-width="336"></div>
+            <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-text="sign_in_with" data-shape="rect" data-logo_alignment="center" data-width="356"></div>
 
             <div class="divider">ODER MIT E-MAIL</div>
 
@@ -269,7 +279,11 @@ function renderLoginPage(res, errorMessage = '') {
                     <label>Passwort</label>
                     <input type="password" name="password" required autocomplete="current-password">
                 </div>
-                <button type="submit" class="btn">Anmelden / Registrieren</button>
+                <div class="form-group">
+                    <label>Modus wählen:</label>
+                    <button type="submit" name="mode" value="raspi" class="btn btn-raspi">Zum Raspi-Tunnel weiter</button>
+                    <button type="submit" name="mode" value="dashboard" class="btn btn-dash">Zum Dashboard / Protokoll</button>
+                </div>
             </form>
         </div>
     </body>
@@ -284,10 +298,16 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. Auth & System-Routen (IMMER direkt behandeln, niemals zum Raspi proxyn!)
+    // 1. WHITELIST CHECK: Wenn IP drin, direkt zum Raspi ohne jede Auth!
+    if (whitelist.includes(clientIp)) {
+        return passToProxy(req, res);
+    }
+
+    // 2. AUTH API: Login per E-Mail & Passwort
     if (req.url === '/api/auth/login' && req.method === 'POST') {
-        const { email, password } = await parsePostData(req);
-        if (!email || !password) return renderLoginPage(res, 'Bitte E-Mail und Passwort eingeben.');
+        const data = await parsePostData(req);
+        const { email, password, mode } = data;
+        if (!email || !password) return renderStartPage(res, 'Bitte E-Mail und Passwort eingeben.');
 
         let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!user) {
@@ -295,14 +315,15 @@ http.createServer(async (req, res) => {
             const result = db.prepare('INSERT INTO users (email, password_hash, auth_provider) VALUES (?, ?, ?)').run(email, hash, 'local');
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
         } else if (user.password_hash) {
-            if (!bcrypt.compareSync(password, user.password_hash)) return renderLoginPage(res, 'Ungültiges Passwort.');
+            if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(res, 'Ungültiges Passwort.');
         }
 
-        createSession(res, user.id);
-        res.writeHead(302, { 'Location': '/dashboard' });
+        createSession(res, user.id, mode === 'dashboard' ? 'dashboard' : 'raspi');
+        res.writeHead(302, { 'Location': mode === 'dashboard' ? '/dashboard' : '/' });
         return res.end();
     }
 
+    // 3. AUTH API: Google Login (Standardmäßig Raspi-Modus)
     if (req.url === '/api/auth/google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -315,26 +336,23 @@ http.createServer(async (req, res) => {
                 user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
             }
 
-            createSession(res, user.id);
-            res.writeHead(302, { 'Location': '/dashboard' });
+            createSession(res, user.id, 'raspi');
+            res.writeHead(302, { 'Location': '/' });
             return res.end();
         } catch (e) {
-            return renderLoginPage(res, 'Google Login fehlgeschlagen.');
+            return renderStartPage(res, 'Google Login fehlgeschlagen.');
         }
     }
 
-    // --- USER DASHBOARD ---
+    // 4. USER DASHBOARD (/dashboard)
     if (req.url === '/dashboard' && req.method === 'GET') {
-        const user = getSessionUser(req);
-        if (!user) {
+        const active = getSessionSession(req);
+        if (!active || !active.session.is_dashboard) {
             res.writeHead(302, { 'Location': '/' });
             return res.end();
         }
-        if (user.is_banned) {
-            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end(`🛡️ TITAN OS: Dein Account wurde gesperrt.`);
-        }
 
+        const { user } = active;
         const logs = db.prepare('SELECT method, url, bytes_transferred, timestamp FROM request_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50').all();
         const percentUsed = Math.min(100, (user.traffic_used / user.traffic_limit) * 100).toFixed(2);
         const usedGB = (user.traffic_used / (1024 * 1024 * 1024)).toFixed(2);
@@ -359,23 +377,24 @@ http.createServer(async (req, res) => {
                 th { color: #58a6ff; }
                 .badge { background: #21262d; padding: 4px 8px; border-radius: 4px; color: #58a6ff; font-family: monospace; }
                 .btn-back { display: inline-block; background: #21262d; color: #58a6ff; padding: 8px 16px; border-radius: 6px; text-decoration: none; margin-bottom: 20px; border: 1px solid #30363d; }
+                .btn-admin { background: #da3633; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; float: right; font-weight: 600; }
             </style>
         </head>
         <body>
             <div class="container">
-                <a href="/" class="btn-back">← Weiter zum Tunnel</a>
-                <div class="card">
-                    <h1>🛡️ TITAN GATEWAY — User Dashboard</h1>
-                    <p>Eingeloggt als: <strong>${user.email}</strong></p>
+                <a href="/" class="btn-back">← Zur Startseite</a>
+                ${user.email === ADMIN_EMAIL ? '<a href="/admin" class="btn-admin">Admin Center</a>' : ''}
+                <div class="card" style="clear: both;">
+                    <h1>🛡️ TITAN GATEWAY — Dashboard</h1>
+                    <p>Anonymes Token aktiv (DSGVO-geschützt)</p>
                     <hr style="border: 0; border-top: 1px solid #30363d; margin: 16px 0;">
-                    <h3>Traffic-Verbrauch</h3>
+                    <h3>Raspi-Tunnel Traffic-Verbrauch</h3>
                     <p>${usedGB} GB von ${limitGB} GB genutzt (${percentUsed}%)</p>
                     <div class="progress-bg"><div class="progress-bar"></div></div>
                 </div>
 
                 <div class="card">
-                    <h2>Dein Aktivitäts-Protokoll (Letzte Anfragen)</h2>
-                    <p style="font-size: 0.8rem; color: #8b949e; margin-bottom: 12px;">DSGVO-Hinweis: Logs werden rein flüchtig im RAM gehalten und nach max. 14 Tagen automatisch gelöscht.</p>
+                    <h2>Dein Aktivitäts-Protokoll (Letzte 14 Tage)</h2>
                     <table>
                         <tr><th>Zeitpunkt</th><th>Methode</th><th>Ziel-URL</th><th>Größe</th></tr>
                         ${logs.map(l => `<tr><td>${l.timestamp}</td><td><span class="badge">${l.method}</span></td><td>${l.url}</td><td>${(l.bytes_transferred / 1024).toFixed(1)} KB</td></tr>`).join('')}
@@ -389,12 +408,37 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
-    // --- ADMIN DASHBOARD ---
+    // 5. ADMIN DASHBOARD (/admin - Verlangt zwingend Google OAuth mit ADMIN_EMAIL)
     if (req.url === '/admin' && req.method === 'GET') {
-        const user = getSessionUser(req);
-        if (!user || user.email !== ADMIN_EMAIL) {
+        const active = getSessionSession(req);
+        
+        // Strikter Check: Ist eingeloggt, hat Admin-Flag UND ist exakt die Admin-E-Mail?
+        if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
+            const adminHtml = `
+            <!DOCTYPE html>
+            <html lang="de">
+            <head>
+                <meta charset="UTF-8">
+                <title>TITAN ADMIN — Google OAuth Login</title>
+                <script src="https://accounts.google.com/gsi/client" async defer></script>
+                <style>
+                    body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; }
+                    .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; text-align: center; }
+                    h1 { color: #f85149; margin-bottom: 16px; font-size: 1.2rem; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>🔒 ADMIN GOOGLE AUTH ERFORDERLICH</h1>
+                    <p style="margin-bottom: 20px; color: #8b949e; font-size: 0.9rem;">Bitte mit ${ADMIN_EMAIL} anmelden.</p>
+                    <div id="g_id_onload" data-client_id="${GOOGLE_CLIENT_ID}" data-login_uri="/api/auth/admin-google" data-auto_prompt="false"></div>
+                    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black"></div>
+                </div>
+            </body>
+            </html>
+            `;
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end("🛡️ TITAN OS: Zugriff verweigert. Admin-Berechtigung erforderlich.");
+            return res.end(adminHtml);
         }
 
         const users = db.prepare('SELECT * FROM users').all();
@@ -423,7 +467,7 @@ http.createServer(async (req, res) => {
             <div class="container">
                 <div class="card">
                     <h1>⚡ TITAN ADMIN CONTROL CENTER</h1>
-                    <p>Admin: <strong>${user.email}</strong></p>
+                    <p>Admin: <strong>${active.user.email}</strong></p>
                     <hr style="border: 0; border-top: 1px solid #30363d; margin: 16px 0;">
                     <table>
                         <tr><th>ID</th><th>E-Mail</th><th>Traffic Genutzt</th><th>Status</th><th>Aktion</th></tr>
@@ -460,9 +504,45 @@ http.createServer(async (req, res) => {
         return res.end(html);
     }
 
+    // Admin Google OAuth Handler
+    if (req.url === '/api/auth/admin-google' && req.method === 'POST') {
+        const { credential } = await parsePostData(req);
+        try {
+            const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+            const email = ticket.getPayload().email;
+
+            if (email !== ADMIN_EMAIL) {
+                res.writeHead(403, { 'Content-Type': 'text/plain' });
+                return res.end("Unautorisiert: Nur der Admin darf diesen Bereich betreten.");
+            }
+
+            let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+            if (!user) {
+                const result = db.prepare('INSERT INTO users (email, auth_provider) VALUES (?, ?)').run(email, 'google');
+                user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+            }
+
+            // Admin-Session erstellen (is_admin = 1, is_raspi = 0, is_dashboard = 0)
+            const token = crypto.randomBytes(32).toString('hex');
+            const expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            db.prepare('INSERT INTO sessions (token, user_id, is_raspi, is_dashboard, is_admin, expires_at) VALUES (?, ?, 0, 0, 1, ?)')
+              .run(token, user.id, expires.toISOString());
+            
+            res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
+                httpOnly: true, path: '/', maxAge: 24 * 60 * 60, sameSite: 'lax'
+            }));
+
+            res.writeHead(302, { 'Location': '/admin' });
+            return res.end();
+        } catch (e) {
+            res.writeHead(403);
+            return res.end("Admin Google Auth fehlgeschlagen.");
+        }
+    }
+
     if (req.url === '/admin/ban' && req.method === 'POST') {
-        const user = getSessionUser(req);
-        if (!user || user.email !== ADMIN_EMAIL) {
+        const active = getSessionSession(req);
+        if (!active || !active.session.is_admin || active.user.email !== ADMIN_EMAIL) {
             res.writeHead(403);
             return res.end("Unauthorized");
         }
@@ -472,28 +552,20 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 2. IP in Whitelist? -> Unendlich Traffic, direkt zum Raspi durchleiten
-    if (whitelist.includes(clientIp)) {
+    // 6. PROXY CHECK: Wenn der Nutzer ein gültiges Raspi-Token hat -> Zum Tunnel durchleiten!
+    const active = getSessionSession(req);
+    if (active && active.session.is_raspi) {
+        if (active.user.traffic_used >= active.user.traffic_limit) {
+            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+            return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(active.user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
+        }
+        req.titanUser = active.user;
+        req.titanSession = active.session;
         return passToProxy(req, res);
     }
 
-    // 3. Regulärer Session & Traffic-Limit Check für alle anderen Anfragen die zum Raspi wollen
-    const user = getSessionUser(req);
-    if (user) {
-        if (user.is_banned) {
-            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end(`🛡️ TITAN OS: Dein Account wurde gesperrt.`);
-        }
-        if (user.traffic_used >= user.traffic_limit) {
-            res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-            return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
-        }
-        req.titanUser = user; 
-        return passToProxy(req, res);
-    }
-
-    // 4. Nicht whitelisted & nicht eingeloggt -> Login/Registrierungs-Maske zeigen
-    renderLoginPage(res);
+    // 7. Fallback: Zeige die Startseite
+    renderStartPage(res);
 
 }).listen(PORT, () => {
     console.log(`TITAN Gateway läuft auf Port ${PORT}`);
