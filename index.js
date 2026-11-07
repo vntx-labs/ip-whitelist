@@ -7,7 +7,37 @@ const cookie = require('cookie');
 const { OAuth2Client } = require('google-auth-library');
 const crypto = require('crypto');
 
-// --- DATENBANK SETUP (Im RAM für Render, synchronisiert mit Gist) ---
+// --- ENVIRONMENT VARIABLEN EINLESEN (Alles rein über URLs & Env) ---
+const PORT = process.env.PORT || 3000;
+const GIST_WHITELIST_URL = process.env.GIST_WHITELIST_URL;
+const GIST_DB_URL = process.env.GIST_DB_URL; // Die vollständige RAW-URL des DB-Gists
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GIST_PATCH_API_URL = process.env.GIST_PATCH_API_URL; // Die normale Gist-API-URL zum Updaten (z.B. https://api.github.com/gists/DEINE_ID)
+const NGROK_DOMAIN = process.env.NGROK_DOMAIN;
+const NGROK_USER = process.env.NGROK_USER;
+const NGROK_PASS = process.env.NGROK_PASS;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+
+// Sicherheits-Check
+const missingEnvs = [];
+if (!GIST_WHITELIST_URL) missingEnvs.push('GIST_WHITELIST_URL');
+if (!GIST_DB_URL) missingEnvs.push('GIST_DB_URL');
+if (!GITHUB_TOKEN) missingEnvs.push('GITHUB_TOKEN');
+if (!GIST_PATCH_API_URL) missingEnvs.push('GIST_PATCH_API_URL');
+if (!NGROK_DOMAIN) missingEnvs.push('NGROK_DOMAIN');
+if (!NGROK_USER) missingEnvs.push('NGROK_USER');
+if (!NGROK_PASS) missingEnvs.push('NGROK_PASS');
+if (!GOOGLE_CLIENT_ID) missingEnvs.push('GOOGLE_CLIENT_ID');
+
+if (missingEnvs.length > 0) {
+    console.error(`[FATAL] Fehlende Environment Variables: ${missingEnvs.join(', ')}`);
+    process.exit(1);
+}
+
+const authHeader = 'Basic ' + Buffer.from(`${NGROK_USER}:${NGROK_PASS}`).toString('base64');
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// --- DATENBANK SETUP (Im RAM, synchronisiert via Gist URL) ---
 const db = new Database(':memory:');
 
 db.exec(`
@@ -16,8 +46,8 @@ db.exec(`
         email TEXT UNIQUE,
         password_hash TEXT,
         auth_provider TEXT DEFAULT 'local',
-        traffic_used INTEGER DEFAULT 0, -- in Bytes
-        traffic_limit INTEGER DEFAULT 10737418240, -- 10 GB Default in Bytes
+        traffic_used INTEGER DEFAULT 0,
+        traffic_limit INTEGER DEFAULT 10737418240,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -29,25 +59,12 @@ db.exec(`
     );
 `);
 
-// --- KONFIGURATION & CREDENTIALS ---
-const GIST_WHITELIST_URL = "https://gist.githubusercontent.com/vntx-labs/8a31394fb00ddee15af6176caab86c2e/raw";
-const GIST_DB_ID = process.env.GIST_DB_ID || "DEINE_PRIVATE_GIST_ID_FÜR_USERS";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // Personal Access Token mit gist-Rechten
-
-const NGROK_DOMAIN = "https://superrespectably-acquainted-jestine.ngrok-free.dev";
-const USERNAME = "oI493HHYNPZXcxlAGClDrwmhID3xFJRbrWzeYBsMabgcqqDuZL";
-const PASSWORD = "ql21AgNSJFHxh1aQAqy873ADT3MNExUurNDJTbP7vOf1zOtFJN";
-const authHeader = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
-
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "DEINE_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
-const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
-
 const proxy = httpProxy.createProxyServer({});
 
 let whitelist = [];
 let isUpdatingWhitelist = false;
 
-// 1. IP-Whitelist alle 5 Minuten laden
+// 1. IP-Whitelist via URL laden
 async function updateWhitelist() {
     if (isUpdatingWhitelist) return;
     isUpdatingWhitelist = true;
@@ -67,41 +84,35 @@ async function updateWhitelist() {
 setInterval(updateWhitelist, 300000);
 setTimeout(updateWhitelist, 2000);
 
-// 2. DB-State aus GitHub Gist laden beim Start
+// 2. DB-State über die Gist-URL laden beim Start
 async function loadDatabaseFromGist() {
-    if (!GITHUB_TOKEN || !GIST_DB_ID) return;
     try {
-        const res = await axios.get(`https://api.github.com/gists/${GIST_DB_ID}`, {
-            headers: { Authorization: `token ${GITHUB_TOKEN}` }
-        });
-        const fileContent = res.data.files['titan_users.json'];
-        if (fileContent && fileContent.content) {
-            const data = JSON.parse(fileContent.content);
+        const res = await axios.get(`${GIST_DB_URL}?nocache=${Date.now()}`, { timeout: 5000 });
+        if (res.data && res.data.users) {
             const insertUser = db.prepare('INSERT OR REPLACE INTO users (id, email, password_hash, auth_provider, traffic_used, traffic_limit, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-            for (const u of data.users || []) {
+            for (const u of res.data.users || []) {
                 insertUser.run(u.id, u.email, u.password_hash, u.auth_provider, u.traffic_used, u.traffic_limit, u.created_at);
             }
             const insertSession = db.prepare('INSERT OR REPLACE INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)');
-            for (const s of data.sessions || []) {
+            for (const s of res.data.sessions || []) {
                 insertSession.run(s.token, s.user_id, s.expires_at);
             }
-            console.log(`[DB] ${data.users.length} Nutzer aus Gist geladen.`);
+            console.log(`[DB] ${res.data.users.length} Nutzer via Gist-URL geladen.`);
         }
     } catch (e) {
-        console.error("[DB] Konnte Gist-DB nicht laden (initial leer?):", e.message);
+        console.error("[DB] Konnte Gist-DB via URL nicht laden (initial leer?):", e.message);
     }
 }
 setTimeout(loadDatabaseFromGist, 3000);
 
-// 3. DB-State alle 10 Sekunden asynchron ins Gist sichern (Traffic-Zähler & neue User)
+// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern
 async function syncDatabaseToGist() {
-    if (!GITHUB_TOKEN || !GIST_DB_ID) return;
     try {
         const users = db.prepare('SELECT * FROM users').all();
         const sessions = db.prepare('SELECT * FROM sessions').all();
         const payload = JSON.stringify({ users, sessions }, null, 2);
 
-        await axios.patch(`https://api.github.com/gists/${GIST_DB_ID}`, {
+        await axios.patch(GIST_PATCH_API_URL, {
             files: {
                 'titan_users.json': { content: payload }
             }
@@ -113,7 +124,7 @@ async function syncDatabaseToGist() {
         console.error("[DB Sync] Fehler beim Speichern ins Gist:", e.message);
     }
 }
-setInterval(syncDatabaseToGist, 10000); // Alle 10 Sekunden!
+setInterval(syncDatabaseToGist, 10000);
 
 // --- PROXY HEADER & TRAFFIC ZÄHLUNG ---
 proxy.on('proxyRes', function (proxyRes, req, res, options) {
@@ -129,7 +140,6 @@ proxy.on('proxyRes', function (proxyRes, req, res, options) {
         delete proxyRes.headers['transfer-encoding'];
     }
 
-    // Traffic mitzählen für angemeldete Nutzer (Response Body Größe)
     if (req.titanUser && proxyRes.headers['content-length']) {
         const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
         db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
@@ -152,7 +162,7 @@ function getSessionUser(req) {
 
 function createSession(res, userId) {
     const token = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 Tage
+    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires.toISOString());
     
     res.setHeader('Set-Cookie', cookie.serialize('titan_session', token, {
@@ -236,12 +246,10 @@ http.createServer(async (req, res) => {
     let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
     if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
-    // 1. IP-Whitelist-Check (Deine Admin-/Trusted-Geräte gehen sofort direkt durch)
     if (whitelist.includes(clientIp)) {
         return passToProxy(req, res);
     }
 
-    // 2. Auth Endpoints
     if (req.url === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         if (!email || !password) return renderLoginPage(res, 'Bitte E-Mail und Passwort eingeben.');
@@ -280,22 +288,20 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // 3. Session & Traffic-Limit Check für externe Nutzer
     const user = getSessionUser(req);
     if (user) {
         if (user.traffic_used >= user.traffic_limit) {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
             return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
         }
-        req.titanUser = user; // Für den Traffic-Zähler im Proxy
+        req.titanUser = user;
         return passToProxy(req, res);
     }
 
-    // 4. Nicht eingeloggt -> Responsive Login-Maske statt Fehlermeldung
     renderLoginPage(res);
 
-}).listen(process.env.PORT || 3000, () => {
-    console.log("TITAN Gateway läuft auf Port", process.env.PORT || 3000);
+}).listen(PORT, () => {
+    console.log(`TITAN Gateway läuft auf Port ${PORT}`);
 });
 
 function passToProxy(req, res) {
@@ -311,6 +317,6 @@ function passToProxy(req, res) {
     }, (err) => {
         console.error("Proxy-Fehler zu ngrok:", err.message);
         res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end("🛡️ TITAN OS: ngrok Tunnel nicht erreichbar.");
+        res.end("🛡️ SHIELD TITAN OS: ngrok Tunnel nicht erreichbar.");
     });
 }
