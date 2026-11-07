@@ -87,6 +87,24 @@ setInterval(() => {
 }, 3600000);
 
 const proxy = httpProxy.createProxyServer({});
+
+// --- TRAFFIC-ZÄHLER & LOGGING IM PROXY ---
+proxy.on('proxyRes', function (proxyRes, req, res, options) {
+    if (req.titanUser && proxyRes.headers['content-length']) {
+        const bytes = parseInt(proxyRes.headers['content-length'], 10) || 0;
+        
+        // Traffic auf das Nutzerkonto addieren
+        db.prepare('UPDATE users SET traffic_used = traffic_used + ? WHERE id = ?').run(bytes, req.titanUser.id);
+        
+        // IP ermitteln
+        let clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress;
+        if (clientIp && clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
+        
+        // In request_logs eintragen (DSGVO-konform, nach 14 Tagen auto-gelöscht oder manuell löschbar)
+        db.prepare('INSERT INTO request_logs (user_id, method, url, ip, bytes_transferred) VALUES (?, ?, ?, ?, ?)')
+          .run(req.titanUser.id, req.method, req.url, clientIp, bytes);
+    }
+});
 let whitelist = [];
 
 async function updateWhitelist() {
@@ -407,7 +425,9 @@ http.createServer(async (req, res) => {
 
     // 3. RASPI = / (und alles, was der Raspi anfragt, wenn die Session aktiv ist oder standardmäßig auf / zugreift)
     if (urlPath === '/' || cookies.titan_session) {
-        if (user) req.titanUser = user;
+        if (user) {
+            req.titanUser = user; // <--- Das ist der Schlüssel für den Zähler!
+        }
         return passToProxy(req, res);
     }
 
