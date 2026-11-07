@@ -196,8 +196,8 @@ function verifyTimeHash(token, hash) {
 
 function getValidSession(req) {
     const cookies = cookie.parse(req.headers.cookie || '');
-    const token = cookies.titan_session;
-    const timeHash = cookies.titan_time_hash;
+    const token = cookies.gateway_session; // NUTZT JETZT GATEWAY SESSION!
+    const timeHash = cookies.gateway_time_hash;
     if (!token || !timeHash) return null;
 
     if (!verifyTimeHash(token, timeHash)) return null;
@@ -226,10 +226,21 @@ function createSession(res, userId, mode) {
 
     const timeHash = generateTimeHash(token);
     
-    res.setHeader('Set-Cookie', [
-        cookie.serialize('titan_session', token, { httpOnly: true, path: '/', maxAge, sameSite: 'lax' }),
-        cookie.serialize('titan_time_hash', timeHash, { httpOnly: true, path: '/', maxAge, sameSite: 'lax' })
-    ]);
+    const cookieSettings = { httpOnly: true, path: '/', maxAge, sameSite: 'lax' };
+    const cookiesArray = [
+        cookie.serialize('gateway_session', token, cookieSettings),
+        cookie.serialize('gateway_time_hash', timeHash, cookieSettings)
+    ];
+
+    // WICHTIG: titan_session wird NUR dann gesetzt, wenn der Modus strikt 'raspi' ist!
+    if (mode === 'raspi') {
+        cookiesArray.push(cookie.serialize('titan_session', token, cookieSettings));
+    } else {
+        // Ansonsten alten titan_session Cookie löschen, falls vorhanden
+        cookiesArray.push(cookie.serialize('titan_session', '', { ...cookieSettings, maxAge: 0 }));
+    }
+
+    res.setHeader('Set-Cookie', cookiesArray);
 }
 
 function parsePostData(req) {
@@ -328,7 +339,7 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 2. LOGIN API (E-Mail / Passwort) - Setzt KEIN is_raspi Token! Nur DB-User-Session für die Startseite.
+    // 2. LOGIN API (E-Mail / Passwort) - Setzt NUR gateway_session, KEIN titan_session!
     if (req.url === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
         if (!email || !password) return renderStartPage(req, res, null, 'Bitte E-Mail und Passwort eingeben.');
@@ -342,12 +353,12 @@ http.createServer(async (req, res) => {
             if (!bcrypt.compareSync(password, user.password_hash)) return renderStartPage(req, res, null, 'Passwort ist nicht korrekt.');
         }
 
-        createSession(res, user.id, 'none'); // Nur Login auf Startseite, kein Raspi/Dashboard aktiv!
+        createSession(res, user.id, 'none'); 
         res.writeHead(302, { 'Location': '/' });
         return res.end();
     }
 
-    // 3. GOOGLE OAUTH LOGIN
+    // 3. GOOGLE OAUTH LOGIN - Setzt NUR gateway_session, KEIN titan_session!
     if (req.url === '/api/auth/google' && req.method === 'POST') {
         const { credential } = await parsePostData(req);
         try {
@@ -368,7 +379,7 @@ http.createServer(async (req, res) => {
         }
     }
 
-    // 4. MODUS AUSWAHL (Hier werden die spezifischen Tokens is_raspi / is_dashboard / is_admin gesetzt!)
+    // 4. MODUS AUSWAHL
     if (req.url === '/api/select-mode' && req.method === 'POST') {
         const active = getValidSession(req);
         if (!active) {
@@ -381,6 +392,7 @@ http.createServer(async (req, res) => {
         const mode = data.mode;
 
         if (mode === 'raspi') {
+            // Hier wird erst der titan_session Cookie aktiviert!
             createSession(res, user.id, 'raspi');
             res.writeHead(302, { 'Location': '/' });
             return res.end();
@@ -548,9 +560,11 @@ http.createServer(async (req, res) => {
         return res.end();
     }
 
-    // 7. PROXY CHECK: NUR WENN is_raspi=true im Token gesetzt ist, wird zum Raspi weitergeleitet!
+    // 7. PROXY CHECK: Nur wenn der Raspi-Modus aktiv ist und der titan_session Cookie existiert!
+    const cookies = cookie.parse(req.headers.cookie || '');
     const active = getValidSession(req);
-    if (active && active.session.is_raspi) {
+    
+    if (active && active.session.is_raspi && cookies.titan_session) {
         if (active.user.traffic_used >= active.user.traffic_limit) {
             res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
             return res.end(`🛡️ TITAN OS: Dein monatliches Traffic-Limit von ${Math.round(active.user.traffic_limit / 1024 / 1024 / 1024)} GB ist aufgebraucht.`);
@@ -560,7 +574,7 @@ http.createServer(async (req, res) => {
         return passToProxy(req, res);
     }
 
-    // 8. Fallback: Startseite anzeigen
+    // 8. Fallback: Startseite anzeigen (sichert Dashboard und Admin ab, kein Raspi-Proxy)
     renderStartPage(req, res, active ? active.user.email : null);
 
 }).listen(PORT, () => {
@@ -578,7 +592,7 @@ function passToProxy(req, res) {
             "Accept-Encoding": "identity" 
         }
     }, (err) => {
-        console.error("Proxy-Fehler zu ngrok:", err.message);
+        console.error("Proxy-Fehler to ngrok:", err.message);
         res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end("🛡️ SHIELD TITAN OS: ngrok Tunnel nicht erreichbar.");
     });
