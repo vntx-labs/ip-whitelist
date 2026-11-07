@@ -108,6 +108,7 @@ async function loadDatabaseFromGist() {
 setTimeout(loadDatabaseFromGist, 2500);
 
 // 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern (Traffic-Zähler & neue User)
+// 3. DB-State alle 10 Sekunden via PATCH-API ins Gist sichern (mit präzisem Fehler-Log)
 async function syncDatabaseToGist() {
     try {
         const users = db.prepare('SELECT * FROM users').all();
@@ -116,14 +117,18 @@ async function syncDatabaseToGist() {
 
         await axios.patch(GIST_PATCH_API_URL, {
             files: {
-                'user_db.json': { content: payload }
+                'titan_users.json': { content: payload }
             }
         }, {
             headers: { Authorization: `token ${GITHUB_TOKEN}` },
             timeout: 5000
         });
+        console.log("[DB Sync] Gist erfolgreich aktualisiert.");
     } catch (e) {
-        console.error("[DB Sync] Fehler beim Speichern ins Gist:", e.message);
+        // Hier ziehen wir die exakte Fehlermeldung aus der GitHub-Antwort heraus
+        const errorDetails = e.response ? JSON.stringify(e.response.data) : e.message;
+        const statusCode = e.response ? e.response.status : 'Kein Status';
+        console.error(`[DB Sync] Fehler ${statusCode} beim Speichern ins Gist:`, errorDetails);
     }
 }
 setInterval(syncDatabaseToGist, 10000); // Alle 10 Sekunden
