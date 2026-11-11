@@ -200,6 +200,20 @@ http.createServer(async (req, res) => {
         return serveFile(res, 'public/banned.html', { '{{ADMIN_EMAIL}}': ADMIN_EMAIL });
     }
 
+    // Traffic-Limit Überprüfung (10 GB Grenze)
+    if (user && user.traffic_used >= user.traffic_limit && user.email !== ADMIN_EMAIL) {
+        res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(`
+            <div style="background:#0d1117; color:#f85149; font-family:sans-serif; display:flex; align-items:center; justify-content:center; height:100vh;">
+                <div style="background:#161b22; border:1px solid #f85149; padding:32px; border-radius:12px; text-align:center;">
+                    <h2>🛑 Traffic-Limit erreicht (10 GB)</h2>
+                    <p style="color:#8b949e;">Dein monatliches Kontingent ist aufgebraucht. Zugriff bis zum nächsten Reset gesperrt.</p>
+                    <a href="/dashboard.html" style="color:#58a6ff;">Zum Dashboard</a>
+                </div>
+            </div>
+        `);
+    }
+
     // Auth Endpoints
     if (urlPath === '/api/auth/login' && req.method === 'POST') {
         const { email, password } = await parsePostData(req);
