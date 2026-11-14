@@ -2,23 +2,39 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TITAN — Admin Login</title>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <style>
-        body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 380px; text-align: center; }
+        :root { --bg:#03050a; --card:rgba(13,18,30,0.72); --err:#ff4d6d; --accent:#00f2ff; --text:#eef2ff; --muted:#8b9bb4; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; font-family:'Inter','Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); display:flex; align-items:center; justify-content:center; padding:20px; overflow:hidden; }
+        .bg-grid { position:fixed; inset:0; z-index:-2; background-image:linear-gradient(rgba(255,77,109,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,77,109,0.04) 1px,transparent 1px); background-size:48px 48px; }
+        .aurora { position:fixed; width:520px; height:520px; border-radius:50%; filter:blur(130px); opacity:0.22; z-index:-2; background:radial-gradient(circle,var(--err),transparent 70%); }
+        .card { position:relative; width:100%; max-width:400px; background:var(--card); backdrop-filter:blur(24px); -webkit-backdrop-filter:blur(24px); border:1px solid rgba(255,77,109,0.3); border-radius:24px; padding:38px 32px; text-align:center; box-shadow:0 25px 60px rgba(0,0,0,0.75); overflow:hidden; animation:reveal .6s cubic-bezier(.16,1,.3,1); }
+        .card::before { content:""; position:absolute; top:0; left:-50%; width:200%; height:2px; background:linear-gradient(90deg,transparent,var(--err),var(--accent),transparent); animation:scan 4s linear infinite; }
+        @keyframes scan { 0%{transform:translateX(-30%)} 100%{transform:translateX(30%)} }
+        @keyframes reveal { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+        h2 { margin:0 0 8px; font-size:21px; font-weight:800; color:#ff758f; letter-spacing:1px; }
+        p { color:var(--muted); font-size:13px; margin:0 0 24px; }
+        .google-wrap { display:flex; justify-content:center; margin-bottom:24px; }
+        a.back { color:#93c5fd; text-decoration:none; font-size:13px; font-weight:600; }
+        a.back:hover { color:var(--accent); }
     </style>
 </head>
 <body>
+    <div class="bg-grid"></div>
+    <div class="aurora"></div>
     <div class="card">
-        <h2 style="color: #f85149;">🔒 Admin Google Auth</h2>
-        <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 20px;">Nur für {{ADMIN_EMAIL}}</p>
-        
-        <div id="g_id_onload" data-client_id="{{GOOGLE_CLIENT_ID}}" data-login_uri="{{ADMIN_LOGIN_URI}}" data-auto_prompt="false"></div>
-        <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-width="316"></div>
-        
-        <br><br>
-        <a href="/index.html" style="color: #58a6ff; text-decoration: none; font-size: 0.85rem;">← Zurück zur Startseite</a>
+        <h2>🔒 Admin Google Auth</h2>
+        <p>Nur für <strong>{{ADMIN_EMAIL}}</strong></p>
+
+        <div class="google-wrap">
+            <div id="g_id_onload" data-client_id="{{GOOGLE_CLIENT_ID}}" data-login_uri="{{ADMIN_LOGIN_URI}}" data-auto_prompt="false"></div>
+            <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-width="316"></div>
+        </div>
+
+        <a href="/index.html" class="back">← Zurück zur Startseite</a>
     </div>
 </body>
 </html>
