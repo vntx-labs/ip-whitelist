@@ -2,28 +2,75 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TITAN GATEWAY — Login</title>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <style>
-        body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 380px; text-align: center; }
-        input { width: 100%; padding: 10px; margin: 8px 0; background: #0d1117; border: 1px solid #30363d; color: #fff; border-radius: 6px; }
-        button { width: 100%; padding: 10px; background: #238636; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+        :root { --bg:#03050a; --card:rgba(13,18,30,0.72); --border:rgba(255,255,255,0.1); --accent:#00f2ff; --blue:#3b82f6; --violet:#8b5cf6; --text:#eef2ff; --muted:#8b9bb4; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; font-family:'Inter','Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); display:flex; align-items:center; justify-content:center; padding:20px; overflow-x:hidden; }
+        #titan-canvas { position:fixed; inset:0; width:100%; height:100%; z-index:-3; pointer-events:none; }
+        .bg-grid { position:fixed; inset:0; z-index:-2; pointer-events:none; background-image:linear-gradient(rgba(0,242,255,0.035) 1px,transparent 1px),linear-gradient(90deg,rgba(0,242,255,0.035) 1px,transparent 1px); background-size:48px 48px; mask-image:radial-gradient(ellipse 80% 70% at 50% 45%,#000 30%,transparent 100%); -webkit-mask-image:radial-gradient(ellipse 80% 70% at 50% 45%,#000 30%,transparent 100%); }
+        .aurora { position:fixed; width:540px; height:540px; border-radius:50%; filter:blur(130px); opacity:0.22; z-index:-2; pointer-events:none; animation:drift 16s ease-in-out infinite alternate; }
+        .a1 { top:-180px; left:-120px; background:radial-gradient(circle,var(--accent),transparent 70%); }
+        .a2 { bottom:-200px; right:-120px; background:radial-gradient(circle,var(--violet),transparent 70%); animation-delay:-8s; }
+        @keyframes drift { 0%{transform:translate(0,0) scale(1)} 100%{transform:translate(50px,35px) scale(1.12)} }
+
+        .card { position:relative; width:100%; max-width:410px; background:var(--card); backdrop-filter:blur(24px) saturate(160%); -webkit-backdrop-filter:blur(24px) saturate(160%); border:1px solid var(--border); border-radius:24px; padding:38px 32px 32px; text-align:center; box-shadow:0 25px 60px rgba(0,0,0,0.75), inset 0 1px 0 rgba(255,255,255,0.12); overflow:hidden; animation:reveal .6s cubic-bezier(.16,1,.3,1); }
+        .card::before { content:""; position:absolute; top:0; left:-50%; width:200%; height:2px; background:linear-gradient(90deg,transparent,var(--accent),var(--violet),transparent); animation:scan 4s linear infinite; }
+        @keyframes scan { 0%{transform:translateX(-30%)} 100%{transform:translateX(30%)} }
+        @keyframes reveal { from{opacity:0;transform:translateY(20px) scale(.97)} to{opacity:1;transform:translateY(0) scale(1)} }
+
+        .emblem { position:relative; width:64px; height:64px; margin:0 auto 16px; display:flex; align-items:center; justify-content:center; }
+        .emblem .orbit { position:absolute; inset:0; border-radius:50%; border:1.5px dashed rgba(0,242,255,0.45); animation:spin 14s linear infinite; }
+        .emblem .core { width:48px; height:48px; border-radius:14px; background:linear-gradient(135deg,rgba(0,242,255,0.18),rgba(59,130,246,0.15)); border:1px solid rgba(0,242,255,0.38); display:flex; align-items:center; justify-content:center; box-shadow:0 0 24px rgba(0,242,255,0.22); }
+        @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+
+        h2 { margin:0 0 6px; font-size:22px; font-weight:800; letter-spacing:2px; background:linear-gradient(90deg,#fff,var(--accent)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+        p.sub { color:var(--muted); font-size:13px; margin:0 0 22px; }
+        .google-wrap { display:flex; justify-content:center; margin-bottom:20px; }
+        .divider { display:flex; align-items:center; gap:12px; color:#5b6b84; font-size:11px; letter-spacing:1.2px; text-transform:uppercase; margin:18px 0; }
+        .divider::before, .divider::after { content:""; flex:1; height:1px; background:rgba(255,255,255,0.08); }
+
+        input { width:100%; padding:13px 16px; margin-bottom:13px; background:rgba(5,8,15,0.75); border:1px solid rgba(255,255,255,0.1); color:#fff; border-radius:12px; outline:none; font-size:14px; transition:.25s; }
+        input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(0,242,255,0.14); }
+        button { position:relative; overflow:hidden; width:100%; padding:14px; background:linear-gradient(135deg,var(--accent),var(--blue)); color:#020617; border:none; border-radius:12px; cursor:pointer; font-weight:800; font-size:13px; text-transform:uppercase; letter-spacing:1.2px; margin-top:4px; box-shadow:0 8px 25px rgba(0,242,255,0.25); transition:.25s; }
+        button:hover { transform:translateY(-2px); box-shadow:0 12px 30px rgba(0,242,255,0.4); }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2>🛡️ TITAN GATEWAY</h2>
-        <p style="color: #8b949e; font-size: 0.9rem; margin-bottom: 20px;">Bitte anmelden</p>
-        
-        <div id="g_id_onload" data-client_id="{{GOOGLE_CLIENT_ID}}" data-login_uri="https://ip-whitelist.onrender.com/api/auth/google" data-auto_prompt="false"></div>
-        <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-width="316"></div>
+    <canvas id="titan-canvas"></canvas>
+    <div class="bg-grid"></div>
+    <div class="aurora a1"></div>
+    <div class="aurora a2"></div>
 
-        <form action="/api/auth/login" method="POST" style="margin-top: 20px;">
-            <input type="email" name="email" placeholder="E-Mail" required>
+    <div class="card">
+        <div class="emblem">
+            <div class="orbit"></div>
+            <div class="core">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#00f2ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+        </div>
+
+        <h2>TITAN GATEWAY</h2>
+        <p class="sub">Bitte authentifizieren, um fortzufahren</p>
+
+        <div class="google-wrap">
+            <div id="g_id_onload" data-client_id="{{GOOGLE_CLIENT_ID}}" data-login_uri="https://ip-whitelist.onrender.com/api/auth/google" data-auto_prompt="false"></div>
+            <div class="g_id_signin" data-type="standard" data-size="large" data-theme="filled_black" data-width="316"></div>
+        </div>
+
+        <div class="divider">oder mit E-Mail</div>
+
+        <form action="/api/auth/login" method="POST">
+            <input type="email" name="email" placeholder="E-Mail Adresse" required>
             <input type="password" name="password" placeholder="Passwort" required>
             <button type="submit">Mit E-Mail anmelden</button>
         </form>
     </div>
+
+    <script>
+        (function(){const c=document.getElementById('titan-canvas'),x=c.getContext('2d');let w,h;function r(){w=c.width=innerWidth;h=c.height=innerHeight}addEventListener('resize',r);r();const p=Array.from({length:innerWidth<700?24:45},()=>({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.4,vy:(Math.random()-.5)*.4,r:Math.random()*1.6+.7}));(function d(){x.clearRect(0,0,w,h);for(let i=0;i<p.length;i++){const a=p[i];a.x+=a.vx;a.y+=a.vy;if(a.x<0||a.x>w)a.vx*=-1;if(a.y<0||a.y>h)a.vy*=-1;x.beginPath();x.arc(a.x,a.y,a.r,0,Math.PI*2);x.fillStyle='rgba(0,242,255,.5)';x.fill();for(let j=i+1;j<p.length;j++){const b=p[j],k=Math.hypot(a.x-b.x,a.y-b.y);if(k<125){x.beginPath();x.moveTo(a.x,a.y);x.lineTo(b.x,b.y);x.strokeStyle=`rgba(0,242,255,${.14*(1-k/125)})`;x.lineWidth=.8;x.stroke()}}}requestAnimationFrame(d)})()})();
+    </script>
 </body>
 </html>
