@@ -2,20 +2,33 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TITAN — Konto gesperrt</title>
     <style>
-        body { background: #0d1117; color: #c9d1d9; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-        .card { background: #161b22; border: 1px solid #f85149; border-radius: 12px; padding: 32px; width: 450px; text-align: center; box-shadow: 0 10px 30px rgba(248,81,73,0.2); }
-        h2 { color: #f85149; margin-bottom: 16px; }
-        p { color: #8b949e; font-size: 0.95rem; line-height: 1.5; margin-bottom: 20px; }
-        a.btn { display: inline-block; padding: 10px 20px; background: #1f6feb; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 10px; }
+        :root { --bg:#03050a; --card:rgba(18,10,16,0.78); --err:#ff4d6d; --accent:#00f2ff; --text:#eef2ff; --muted:#a1a1aa; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; font-family:'Inter','Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); display:flex; align-items:center; justify-content:center; padding:20px; overflow:hidden; }
+        .bg-grid { position:fixed; inset:0; z-index:-2; background-image:linear-gradient(rgba(255,77,109,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,77,109,0.04) 1px,transparent 1px); background-size:48px 48px; }
+        .aurora { position:fixed; width:560px; height:560px; border-radius:50%; filter:blur(130px); opacity:0.25; z-index:-2; background:radial-gradient(circle,var(--err),transparent 70%); }
+        .card { width:100%; max-width:460px; background:var(--card); backdrop-filter:blur(24px); -webkit-backdrop-filter:blur(24px); border:1px solid rgba(255,77,109,0.45); border-radius:24px; padding:38px 32px; text-align:center; box-shadow:0 25px 60px rgba(255,77,109,0.18); animation:reveal .55s cubic-bezier(.16,1,.3,1); }
+        @keyframes reveal { from{opacity:0;transform:scale(.96)} to{opacity:1;transform:scale(1)} }
+        .warn-icon { width:62px; height:62px; margin:0 auto 18px; border-radius:50%; background:rgba(255,77,109,0.15); border:1px solid rgba(255,77,109,0.45); display:flex; align-items:center; justify-content:center; font-size:28px; animation:pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,77,109,0.4)} 50%{box-shadow:0 0 0 14px rgba(255,77,109,0)} }
+        h2 { margin:0 0 14px; font-size:22px; color:#ff758f; }
+        p { color:var(--muted); font-size:14px; line-height:1.65; margin:0 0 26px; }
+        p strong { color:#fff; }
+        a.btn { display:inline-block; padding:13px 26px; background:linear-gradient(135deg,#2563eb,#00f2ff); color:#020617; text-decoration:none; border-radius:12px; font-weight:800; font-size:13.5px; transition:.25s; box-shadow:0 8px 25px rgba(0,242,255,0.25); }
+        a.btn:hover { transform:translateY(-2px); box-shadow:0 12px 32px rgba(0,242,255,0.4); }
     </style>
 </head>
 <body>
+    <div class="bg-grid"></div>
+    <div class="aurora"></div>
     <div class="card">
-        <h2>⚠️ Konto gesperrt</h2>
+        <div class="warn-icon">⚠️</div>
+        <h2>Konto gesperrt</h2>
         <p>Ihr Konto wurde aufgrund von verdächtigen Aktivitäten gesperrt. Bitte kontaktieren Sie bei Fragen oder Beschwerden <strong>{{ADMIN_EMAIL}}</strong> oder rufen Sie das Hilfe-Formular auf.</p>
-        <a href="/help.html" class="btn">Zum Hilfe-Formular</a>
+        <a href="/help.html" class="btn">Zum Hilfe-Formular →</a>
     </div>
 </body>
 </html>
