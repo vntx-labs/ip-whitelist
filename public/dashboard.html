@@ -2,33 +2,89 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TITAN — Dashboard</title>
     <style>
-        body { background: #0d1117; color: #c9d1d9; padding: 40px; font-family: sans-serif; }
-        .container { max-width: 800px; margin: auto; background: #161b22; padding: 24px; border-radius: 12px; border: 1px solid #30363d; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.85rem; }
-        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #30363d; color: #8b949e; }
-        .btn-danger { background: #da3633; color: #fff; padding: 8px 12px; border: none; border-radius: 6px; cursor: pointer; margin-top: 20px; }
+        :root { --bg:#03050a; --card:rgba(13,18,30,0.72); --border:rgba(255,255,255,0.09); --accent:#00f2ff; --blue:#3b82f6; --violet:#8b5cf6; --text:#eef2ff; --muted:#8b9bb4; --err:#ff4d6d; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; font-family:'Inter','Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); padding:32px 18px 60px; overflow-x:hidden; }
+        #titan-canvas { position:fixed; inset:0; width:100%; height:100%; z-index:-3; pointer-events:none; }
+        .bg-grid { position:fixed; inset:0; z-index:-2; pointer-events:none; background-image:linear-gradient(rgba(0,242,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,242,255,0.03) 1px,transparent 1px); background-size:48px 48px; }
+        .aurora { position:fixed; width:560px; height:560px; border-radius:50%; filter:blur(130px); opacity:0.18; z-index:-2; pointer-events:none; }
+        .a1 { top:-200px; left:-140px; background:radial-gradient(circle,var(--accent),transparent 70%); }
+        .a2 { bottom:-220px; right:-140px; background:radial-gradient(circle,var(--violet),transparent 70%); }
+
+        .container { max-width:960px; margin:0 auto; animation:reveal .55s cubic-bezier(.16,1,.3,1); }
+        @keyframes reveal { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+
+        .back-link { display:inline-flex; align-items:center; gap:6px; padding:8px 14px; border-radius:10px; background:rgba(255,255,255,0.04); border:1px solid var(--border); color:#93c5fd; text-decoration:none; font-size:13px; font-weight:600; transition:.2s; margin-bottom:20px; }
+        .back-link:hover { border-color:var(--accent); color:#fff; }
+
+        .panel { background:var(--card); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px); border:1px solid var(--border); border-radius:22px; padding:28px; box-shadow:0 24px 60px rgba(0,0,0,0.65); }
+        h1 { margin:0 0 6px; font-size:26px; font-weight:700; background:linear-gradient(90deg,#fff,var(--accent)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+        .sub { color:var(--muted); font-size:13.5px; margin:0 0 24px; }
+        .sub strong { color:#fff; }
+
+        .traffic-box { background:rgba(5,8,15,0.6); border:1px solid rgba(255,255,255,0.07); border-radius:16px; padding:18px 20px; margin-bottom:26px; }
+        .traffic-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; font-size:14px; font-weight:600; }
+        .traffic-track { width:100%; height:10px; background:rgba(255,255,255,0.07); border-radius:999px; overflow:hidden; }
+        .traffic-fill { height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg,var(--accent),var(--blue),var(--violet)); transition:width 1s cubic-bezier(.16,1,.3,1); box-shadow:0 0 14px rgba(0,242,255,0.5); }
+
+        h3 { margin:0 0 14px; font-size:16px; color:#e2e8f0; }
+        .table-wrap { overflow-x:auto; border-radius:14px; border:1px solid rgba(255,255,255,0.07); background:rgba(5,8,15,0.5); }
+        table { width:100%; border-collapse:collapse; font-size:13px; }
+        th, td { text-align:left; padding:11px 14px; border-bottom:1px solid rgba(255,255,255,0.06); color:var(--muted); }
+        th { color:var(--accent); font-size:11.5px; text-transform:uppercase; letter-spacing:.8px; background:rgba(255,255,255,0.02); }
+        tr:hover td { background:rgba(255,255,255,0.02); color:#e2e8f0; }
+
+        .btn-danger { margin-top:24px; padding:12px 18px; background:rgba(255,77,109,0.12); border:1px solid rgba(255,77,109,0.4); color:#fda4af; border-radius:12px; cursor:pointer; font-weight:700; font-size:13px; transition:.25s; }
+        .btn-danger:hover { background:var(--err); color:#fff; border-color:var(--err); box-shadow:0 8px 25px rgba(255,77,109,0.35); }
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="/index.html" style="color: #58a6ff; text-decoration: none;">← Zur Startseite</a>
-        <h1>User Dashboard</h1>
-        <p>Eingeloggt als: <strong>{{USER_EMAIL}}</strong></p>
-        <hr style="border:0; border-top:1px solid #30363d; margin:15px 0;">
-        <h3>Traffic-Verbrauch: {{USED_GB}} GB von {{LIMIT_GB}} GB</h3>
-        
-        <h3 style="margin-top: 25px;">Aktivitäts-Protokoll & Seiten-Bandbreite</h3>
-        <table>
-            <tr><th>Zeitpunkt</th><th>Methode</th><th>Aufgerufene URL / Seite</th><th>Größe</th></tr>
-            {{LOGS}}
-        </span>
+    <canvas id="titan-canvas"></canvas>
+    <div class="bg-grid"></div>
+    <div class="aurora a1"></div>
+    <div class="aurora a2"></div>
 
-        <!-- DSGVO: Nur Log-Daten löschen ohne Account-Zerstörung -->
-        <form action="/api/dsgvo/delete-logs" method="POST" onsubmit="return confirm('Möchten Sie Ihre Aktivitäts-Protokolle und Traffic-Daten gemäß DSGVO (Recht auf Vergessenwerden) jetzt sofort unwiderruflich löschen?');">
-            <button type="submit" class="btn-danger">DSGVO: Meine Aktivitäts-Protokolle & Logs sofort löschen</button>
-        </form>
+    <div class="container">
+        <a href="/index.html" class="back-link">← Zur Startseite</a>
+
+        <div class="panel">
+            <h1>User Dashboard</h1>
+            <p class="sub">Eingeloggt als: <strong>{{USER_EMAIL}}</strong></p>
+
+            <div class="traffic-box">
+                <div class="traffic-head">
+                    <span>Traffic-Verbrauch</span>
+                    <span style="color:var(--accent); font-family:monospace;">{{USED_GB}} GB / {{LIMIT_GB}} GB</span>
+                </div>
+                <div class="traffic-track"><div class="traffic-fill" id="trafficBar"></div></div>
+            </div>
+
+            <h3>Aktivitäts-Protokoll &amp; Seiten-Bandbreite</h3>
+            <div class="table-wrap">
+                <table>
+                    <tr><th>Zeitpunkt</th><th>Methode</th><th>Aufgerufene URL / Seite</th><th>Größe</th></tr>
+                    {{LOGS}}
+                </table>
+            </div>
+
+            <!-- DSGVO: Nur Log-Daten löschen ohne Account-Zerstörung -->
+            <form action="/api/dsgvo/delete-logs" method="POST" onsubmit="return confirm('Möchten Sie Ihre Aktivitäts-Protokolle und Traffic-Daten gemäß DSGVO (Recht auf Vergessenwerden) jetzt sofort unwiderruflich löschen?');">
+                <button type="submit" class="btn-danger">DSGVO: Meine Aktivitäts-Protokolle &amp; Logs sofort löschen</button>
+            </form>
+        </div>
     </div>
+
+    <script>
+        const used = parseFloat("{{USED_GB}}") || 0;
+        const limit = parseFloat("{{LIMIT_GB}}") || 1;
+        const pct = Math.min(100, Math.max(2, (used / limit) * 100));
+        requestAnimationFrame(() => { document.getElementById('trafficBar').style.width = pct + '%'; });
+    </script>
+    <script>
+        (function(){const c=document.getElementById('titan-canvas'),x=c.getContext('2d');let w,h;function r(){w=c.width=innerWidth;h=c.height=innerHeight}addEventListener('resize',r);r();const p=Array.from({length:innerWidth<700?22:40},()=>({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.35,vy:(Math.random()-.5)*.35,r:Math.random()*1.5+.7}));(function d(){x.clearRect(0,0,w,h);for(let i=0;i<p.length;i++){const a=p[i];a.x+=a.vx;a.y+=a.vy;if(a.x<0||a.x>w)a.vx*=-1;if(a.y<0||a.y>h)a.vy*=-1;x.beginPath();x.arc(a.x,a.y,a.r,0,Math.PI*2);x.fillStyle='rgba(0,242,255,.45)';x.fill();for(let j=i+1;j<p.length;j++){const b=p[j],k=Math.hypot(a.x-b.x,a.y-b.y);if(k<120){x.beginPath();x.moveTo(a.x,a.y);x.lineTo(b.x,b.y);x.strokeStyle=`rgba(0,242,255,${.12*(1-k/120)})`;x.lineWidth=.8;x.stroke()}}}requestAnimationFrame(d)})()})();
+    </script>
 </body>
 </html>
