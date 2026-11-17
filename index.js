@@ -192,6 +192,15 @@ http.createServer(async (req, res) => {
     const cookies = cookie.parse(req.headers.cookie || '');
     const urlPath = req.url.split('?')[0];
 
+    // --- GITEA OAUTH & ASSETS PASSTHROUGH (Vor Auth- und Traffic-Prüfung) ---
+    if (urlPath.startsWith('/login/oauth/') || 
+        urlPath.startsWith('/user/login') || 
+        urlPath.startsWith('/assets/') || 
+        urlPath.startsWith('/avatars/') ||
+        urlPath === '/api/v1/user') {
+        return passToProxy(req, res);
+    }
+
     const sessionData = getSessionUser(req);
     const user = sessionData ? sessionData.user : null;
 
